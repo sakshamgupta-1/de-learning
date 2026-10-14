@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Architecture Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="index.html" aria-current="page">1 · Architecture</a>
+    <a href="../../spark-execution.html">2 · Execution</a>
+    <a href="../../spark-optimizer.html">3 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">4 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Architecture &amp; memory</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 1 · Deep dive</p>
+  <h1>Inside the executors</h1>
+  <p class="lede">How tasks fill the cluster, how executor memory is really divided, and the two features that change executors at runtime: dynamic allocation and speculative execution. Start with the <a href="index.html">overview</a> if you need the basics.</p>
+  <div class="toc">
+    <a href="#waves">Slots &amp; waves</a><a href="#memory">Memory in detail</a><a href="#dynamic">Dynamic allocation</a><a href="#speculation">Speculation</a><a href="#modes">Deploy modes</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="waves">
+    <h2>Slots, waves and stage duration</h2>
+    <p>Each executor core is a <b>slot</b> that runs one task at a time. With 10 executors × 4 cores you have 40 slots, so a stage of 1,000 tasks runs in about 1,000 ÷ 40 = <b>25 waves</b>. Picture 40 checkout counters serving 1,000 customers.</p>
+    <div class="fig"><svg viewBox="0 0 700 250" role="img" aria-labelledby="wvT"><title id="wvT">40 slots running 1,000 tasks of 20 seconds in 25 waves over about 500 seconds</title><text class="tm" x="62" y="57" text-anchor="end">slot 1</text><rect class="bxa" x="71" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="95" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="119" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="143" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="167" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="191" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="215" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="239" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="263" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="287" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="311" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="335" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="359" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="383" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="407" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="431" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="455" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="479" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="503" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="527" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="551" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="575" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="599" y="40" width="22" height="24" rx="3"/><rect class="bxb" x="623" y="40" width="22" height="24" rx="3"/><rect class="bxa" x="647" y="40" width="22" height="24" rx="3"/><text class="tm" x="62" y="93" text-anchor="end">slot 2</text><rect class="bxa" x="71" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="95" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="119" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="143" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="167" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="191" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="215" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="239" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="263" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="287" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="311" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="335" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="359" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="383" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="407" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="431" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="455" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="479" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="503" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="527" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="551" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="575" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="599" y="76" width="22" height="24" rx="3"/><rect class="bxb" x="623" y="76" width="22" height="24" rx="3"/><rect class="bxa" x="647" y="76" width="22" height="24" rx="3"/><text class="tm" x="62" y="129" text-anchor="end">slot 3</text><rect class="bxa" x="71" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="95" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="119" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="143" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="167" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="191" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="215" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="239" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="263" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="287" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="311" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="335" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="359" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="383" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="407" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="431" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="455" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="479" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="503" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="527" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="551" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="575" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="599" y="112" width="22" height="24" rx="3"/><rect class="bxb" x="623" y="112" width="22" height="24" rx="3"/><rect class="bxa" x="647" y="112" width="22" height="24" rx="3"/><text class="tm" x="62" y="189" text-anchor="end">slot 40</text><rect class="bxa" x="71" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="95" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="119" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="143" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="167" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="191" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="215" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="239" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="263" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="287" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="311" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="335" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="359" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="383" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="407" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="431" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="455" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="479" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="503" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="527" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="551" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="575" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="599" y="172" width="22" height="24" rx="3"/><rect class="bxb" x="623" y="172" width="22" height="24" rx="3"/><rect class="bxa" x="647" y="172" width="22" height="24" rx="3"/><text class="ts" x="370" y="160" text-anchor="middle">⋮ slots 4–39 run the same pattern ⋮</text><line class="ln" x1="70" y1="206" x2="670" y2="206"/><line class="ln" x1="70.0" y1="202" x2="70.0" y2="210"/><text class="tm" x="70.0" y="226" text-anchor="middle">0s</text><line class="ln" x1="190.0" y1="202" x2="190.0" y2="210"/><text class="tm" x="190.0" y="226" text-anchor="middle">100s</text><line class="ln" x1="310.0" y1="202" x2="310.0" y2="210"/><text class="tm" x="310.0" y="226" text-anchor="middle">200s</text><line class="ln" x1="430.0" y1="202" x2="430.0" y2="210"/><text class="tm" x="430.0" y="226" text-anchor="middle">300s</text><line class="ln" x1="550.0" y1="202" x2="550.0" y2="210"/><text class="tm" x="550.0" y="226" text-anchor="middle">400s</text><line class="ln" x1="670.0" y1="202" x2="670.0" y2="210"/><text class="tm" x="670.0" y="226" text-anchor="middle">500s</text><text class="ts" x="82" y="28">wave 1: tasks 1–40</text><text class="ts" x="670" y="28" text-anchor="end">wave 25: tasks 961–1,000</text><text class="ts" x="370" y="246" text-anchor="middle">each block = one 20 s task · 25 waves × 20 s ≈ 500 s</text></svg></div>
+    <p>At about 20 s per task, 25 waves take roughly 500 s, or 8–9 minutes. In practice a slot picks up the next task as soon as it's free, so the waves blur together, but the total is the same.</p>
+    <h3>What actually shortens a stage</h3>
+    <ul>
+      <li><b>More slots.</b> 80 slots → about 13 waves → roughly half the time. This is the main lever.</li>
+      <li><b>No half-empty last wave.</b> 1,010 tasks need 26 waves, and the last runs 10 tasks while 30 cores sit idle. Keep task counts near a multiple of total cores.</li>
+      <li><b>Merging only tiny tasks.</b> Fewer, larger partitions don't speed up a stage: the work is the same, each task just runs longer. It helps only when tasks take around 100 ms and scheduling overhead dominates.</li>
+      <li><b>Fixing skew.</b> A stage ends when its slowest task ends. One 15-minute task makes the stage take at least 15 minutes, however many slots you add.</li>
+    </ul>
+  </section>
+
+  <section id="memory">
+    <h2>Executor memory in detail</h2>
+    <p>The same 16 GB, 4-core executor as on the overview, drawn as nested regions. Each box is a separate budget; running out of a different box gives a different error.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 340" role="img" aria-labelledby="memT">
+  <title id="memT">Executor container split into heap and overhead; heap split into reserved, user memory and a unified pool of storage and execution</title>
+  <rect class="bx" x="20" y="20" width="860" height="300" rx="10"/>
+  <text class="tb" x="36" y="46">Executor container · 17.6 GB</text>
+  <text class="ts" x="262" y="46">what the cluster manager allocates = heap + overhead</text>
+  <rect class="bx2" x="36" y="62" width="640" height="244" rx="8"/>
+  <text class="tb" x="52" y="86">JVM heap · spark.executor.memory = 16 GB</text>
+  <rect class="bx" x="52" y="100" width="88" height="190" rx="6"/>
+  <text class="tb" x="96" y="130" text-anchor="middle">Reserved</text>
+  <text class="tm" x="96" y="150" text-anchor="middle">0.3 GB</text>
+  <text class="ts" x="96" y="172" text-anchor="middle">fixed</text>
+  <rect class="bx" x="152" y="100" width="150" height="190" rx="6"/>
+  <text class="tb" x="227" y="130" text-anchor="middle">User memory</text>
+  <text class="tm" x="227" y="150" text-anchor="middle">6.3 GB</text>
+  <text class="ts" x="227" y="172" text-anchor="middle">40% of the rest</text>
+  <text class="ts" x="227" y="196" text-anchor="middle">your objects,</text>
+  <text class="ts" x="227" y="214" text-anchor="middle">UDF data structures</text>
+  <text class="ts" x="227" y="238" text-anchor="middle">never spilled</text>
+  <rect class="bx" x="314" y="100" width="350" height="190" rx="6"/>
+  <text class="tb" x="489" y="124" text-anchor="middle">Unified pool · 9.4 GB · 60% of the rest</text>
+  <rect class="bxb" x="326" y="136" width="158" height="142" rx="5"/>
+  <text class="tb" x="405" y="162" text-anchor="middle">Storage</text>
+  <text class="tm" x="405" y="182" text-anchor="middle">~4.7 GB</text>
+  <text class="ts" x="405" y="204" text-anchor="middle">cache, persist,</text>
+  <text class="ts" x="405" y="222" text-anchor="middle">broadcast variables</text>
+  <text class="ts" x="405" y="250" text-anchor="middle">can be evicted</text>
+  <rect class="bxa" x="496" y="136" width="158" height="142" rx="5"/>
+  <text class="tb" x="575" y="162" text-anchor="middle">Execution</text>
+  <text class="tm" x="575" y="182" text-anchor="middle">~4.7 GB</text>
+  <text class="ts" x="575" y="204" text-anchor="middle">shuffle, join,</text>
+  <text class="ts" x="575" y="222" text-anchor="middle">sort, aggregate</text>
+  <text class="ts" x="575" y="250" text-anchor="middle">spills to disk</text>
+  <line class="lna dash" x1="490" y1="132" x2="490" y2="284"/>
+  <rect class="bxr" x="692" y="62" width="172" height="244" rx="8"/>
+  <text class="tb" x="778" y="92" text-anchor="middle">Overhead</text>
+  <text class="tm" x="778" y="112" text-anchor="middle">1.6 GB</text>
+  <text class="ts" x="778" y="134" text-anchor="middle">max(384 MB, 10%)</text>
+  <text class="ts" x="778" y="166" text-anchor="middle">JVM internals</text>
+  <text class="ts" x="778" y="186" text-anchor="middle">network buffers</text>
+  <text class="ts" x="778" y="206" text-anchor="middle">Python workers</text>
+  <text class="ts" x="778" y="226" text-anchor="middle">native libraries</text>
+  <text class="ts" x="778" y="262" text-anchor="middle">outside the heap</text>
+</svg>
+<p class="cap">The dashed line between storage and execution is a soft boundary. Execution can push it left by evicting cached blocks, but only down to the protected storage half (<code>spark.memory.storageFraction = 0.5</code>). Cache can push it right only into execution memory that's free.</p>
+</div></div>
+
+<div class="wrap">
+  <h3>Try your own executor size</h3>
+  <div class="calc" aria-live="polite">
+    <div class="fields">
+      <label for="mem">spark.executor.memory (GB)<input id="mem" type="number" min="1" max="256" step="1" value="16"></label>
+      <label for="cores">spark.executor.cores<input id="cores" type="number" min="1" max="32" step="1" value="4"></label>
+      <label for="ovf">Overhead factor<select id="ovf"><option value="0.10" selected>0.10 (default)</option><option value="0.20">0.20 (PySpark heavy)</option><option value="0.40">0.40 (Kubernetes, non-JVM)</option></select></label>
+    </div>
+    <div class="membar" id="membar"></div>
+    <div class="out" id="memout"></div>
+    <p class="small muted" style="margin-bottom:0">Defaults used: 300 MB reserved, <code>spark.memory.fraction = 0.6</code>, <code>spark.memory.storageFraction = 0.5</code>, overhead = max(384 MB, factor × heap).</p>
+  </div>
+
+  <h3>Why cores matter as much as memory</h3>
+  <p>The unified pool is shared by every task running at once. For the same 16 GB executor:</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Cores per executor</th><th class="num">Tasks at once</th><th class="num">Per task, no cache</th><th class="num">Per task, cache at its half</th></tr></thead>
+    <tbody>
+      <tr><td>2</td><td class="num">2</td><td class="num">4.7 GB</td><td class="num">2.4 GB</td></tr>
+      <tr><td>4</td><td class="num">4</td><td class="num">2.4 GB</td><td class="num">1.2 GB</td></tr>
+      <tr><td>8</td><td class="num">8</td><td class="num">1.2 GB</td><td class="num">0.6 GB</td></tr>
+    </tbody></table></div>
+  <p>Halving cores doubles the memory each task gets, without buying any RAM. The trade-off is less parallelism per executor.</p>
+
+  <h3>How the pool behaves under pressure</h3>
+  <ul>
+    <li><b>Execution needs more:</b> it takes free storage memory, then evicts cached blocks down to the protected half.</li>
+    <li><b>Storage needs more:</b> it can only use free execution memory. Otherwise new blocks are dropped (MEMORY_ONLY) or written to disk (MEMORY_AND_DISK).</li>
+    <li><b>Execution runs out:</b> sorts, joins and aggregations <b>spill</b> sorted runs to local disk and merge them later. Slow, but the task survives.</li>
+    <li><b>Something that can't spill runs out:</b> one huge record, an unbounded <code>collect_list</code>, a hash table that must stay in memory, or objects in user memory. That's an <code>OutOfMemoryError</code>.</li>
+  </ul>
+
+  <h3>Memory that lives outside the heap</h3>
+  <ul>
+    <li><b>Overhead</b> (<code>spark.executor.memoryOverhead</code>, or <code>spark.executor.memoryOverheadFactor</code> since Spark 3.3): JVM metaspace and thread stacks, Netty network buffers used by shuffle, native compression libraries, and Python worker processes.</li>
+    <li><b>PySpark memory</b> (<code>spark.executor.pyspark.memory</code>, unset by default): when set, caps each executor's Python workers and is added to the container request. When unset, Python memory must fit inside overhead.</li>
+    <li><b>Off-heap execution memory</b> (<code>spark.memory.offHeap.enabled</code> + <code>spark.memory.offHeap.size</code>): lets Tungsten keep data outside the JVM heap to cut GC pressure. Since Spark 3.0 it's added to the container size on YARN and Kubernetes.</li>
+  </ul>
+  <p>Container size = heap + overhead + PySpark memory (if set) + off-heap size (if enabled). The cluster manager kills the container when the process goes over that total.</p>
+
+  <section id="dynamic">
+    <h2>Dynamic allocation</h2>
+    <p><b>The problem it solves.</b> With static allocation (<code>--num-executors 50</code>) a job holds all 50 executors for its whole life, even during a stage with 10 tasks or while the driver sits idle between jobs. On a shared YARN or Kubernetes cluster that blocks other teams and wastes money.</p>
+    <p><b>What it does.</b> Spark grows and shrinks the number of executors based on how many tasks are waiting.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 280" role="img" aria-labelledby="daT">
+  <title id="daT">Executor count rising exponentially while tasks are backlogged, dropping to the minimum after 60 seconds idle, then rising again</title>
+  <rect class="bx2" x="80" y="40" width="360" height="200" style="opacity:.55"/>
+  <rect class="bx2" x="584" y="40" width="180" height="200" style="opacity:.55"/>
+  <text class="ts" x="260" y="32" text-anchor="middle">Stage A · 2,000 tasks queued</text>
+  <text class="ts" x="512" y="32" text-anchor="middle">driver-only work</text>
+  <text class="ts" x="674" y="32" text-anchor="middle">Stage B · 40 tasks</text>
+  <line class="ln dash" x1="80" y1="60" x2="800" y2="60"/>
+  <text class="tm" x="808" y="64">max = 50</text>
+  <text class="tm" x="808" y="237">min = 2</text>
+  <line class="ln" x1="80" y1="40" x2="80" y2="240"/>
+  <line class="ln" x1="80" y1="240" x2="800" y2="240"/>
+  <text class="tm" x="72" y="64" text-anchor="end">50</text>
+  <text class="tm" x="72" y="154" text-anchor="end">25</text>
+  <text class="tm" x="72" y="244" text-anchor="end">0</text>
+  <text class="ts" x="20" y="24">executors</text>
+  <text class="ts" x="800" y="262" text-anchor="end">time →</text>
+  <path class="lna" style="stroke-width:2.5" d="M80,233 H116 V226 H152 V211 H188 V182 H224 V125 H260 V60 H512 V233 H620 V226 H656 V211 H800"/>
+  <text class="ts" x="270" y="104">tasks waiting &gt; 1 s → request 1, 2, 4, 8 … more</text>
+  <text class="ts" x="270" y="122">per round, up to the max</text>
+  <text class="ts" x="504" y="176" text-anchor="end">idle 60 s →</text>
+  <text class="ts" x="504" y="194" text-anchor="end">released</text>
+  <text class="ts" x="664" y="196">backlog again</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <h3>How it decides</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Direction</th><th>Trigger</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td><b>Scale up</b></td><td>Tasks pending longer than <code>schedulerBacklogTimeout</code> (1 s)</td><td>Requests double each round (1, 2, 4, 8 …) while the backlog lasts (<code>sustainedSchedulerBacklogTimeout</code>, 1 s), up to <code>maxExecutors</code></td></tr>
+      <tr><td><b>Scale down</b></td><td>An executor ran no tasks for <code>executorIdleTimeout</code> (60 s)</td><td>Never below <code>minExecutors</code>. Executors holding cached data use <code>cachedExecutorIdleTimeout</code>, which is infinite by default, so they're kept</td></tr>
+    </tbody></table></div>
+<pre><code><span class="k">spark.dynamicAllocation.enabled</span>=true
+spark.dynamicAllocation.minExecutors=2
+spark.dynamicAllocation.initialExecutors=2
+spark.dynamicAllocation.maxExecutors=50          <span class="muted"># always set a cap on shared clusters</span>
+spark.dynamicAllocation.executorIdleTimeout=60s
+spark.dynamicAllocation.shuffleTracking.enabled=true   <span class="muted"># or spark.shuffle.service.enabled=true</span></code></pre>
+
+  <h3>The catch: shuffle files</h3>
+  <p>Executors write shuffle output to their own local disk, and the next stage reads it from there. If Spark removed an idle executor, that data would be lost and the parent stage would have to rerun. So dynamic allocation needs one of these:</p>
+  <ul>
+    <li><b>External shuffle service</b> (classic on YARN): a long-running process on each node serves shuffle files, so executors can leave safely.</li>
+    <li><b>Shuffle tracking</b> (Spark 3.0+, common on Kubernetes, where there's no shuffle service): Spark keeps alive any executor that still holds shuffle data a later stage needs.</li>
+    <li><b>Graceful decommissioning</b> (Spark 3.1+, <code>spark.decommission.enabled</code>): before an executor leaves, for example when a spot node is reclaimed, its shuffle and cache blocks are migrated to other executors.</li>
+  </ul>
+
+  <h3>When to use it</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Good fit</th><th>Poor fit</th></tr></thead>
+    <tbody><tr>
+      <td>Shared clusters; notebooks and ad-hoc work; jobs whose stages vary a lot in size; cost control</td>
+      <td>Latency-sensitive jobs (new executors take seconds to minutes to start, longer if new nodes are needed); Structured Streaming, which wants steady capacity; jobs that cache heavily (cached executors never scale down)</td>
+    </tr></tbody></table></div>
+  <p class="small muted">On Databricks you set <b>cluster autoscaling</b> (min/max workers) instead. It adds and removes worker nodes, the platform-level version of the same idea.</p>
+  <div class="callout trap"><div class="lbl">Common trap</div>Dynamic allocation with no <code>maxExecutors</code> on a shared cluster. One job with a large backlog can request every free container and starve everyone else. Always set a cap.</div>
+  <div class="callout say"><div class="lbl">Say it in an interview</div>"Dynamic allocation requests executors when tasks are backlogged for more than a second, doubling each round up to a max, and releases them after 60 seconds idle. It needs an external shuffle service or shuffle tracking so removing an executor doesn't lose shuffle files. I use it on shared or bursty workloads with a sensible max, and avoid it for latency-critical or streaming jobs."</div>
+
+  <section id="speculation">
+    <h2>Speculative execution</h2>
+    <p><b>The problem it solves.</b> Sometimes one task is slow for reasons unrelated to its data: a failing disk, an overloaded node, a noisy neighbour, a slow network link. The stage can't finish until that task does.</p>
+    <p><b>What it does.</b> When enabled (<code>spark.speculation=true</code>, off by default), Spark watches running tasks and launches a <b>duplicate copy</b> of a straggler on a different executor. Whichever copy finishes first wins; the other is killed.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 800 262" role="img" aria-labelledby="spT">
+  <title id="spT">Task 97 runs slowly on a bad node; after 75 percent of tasks finish and it passes 1.5 times the median, a copy launches elsewhere and finishes first</title>
+  <line class="ln dash" x1="345" y1="30" x2="345" y2="214"/>
+  <line class="lna dash" x1="380" y1="30" x2="380" y2="214"/>
+  <text class="ts" x="341" y="22" text-anchor="end">75% of tasks done (25 s)</text>
+  <text class="ts ta" x="384" y="22">1.5 × median 20 s = 30 s → launch copy</text>
+  <text class="tm" x="160" y="55" text-anchor="end">task 1</text><rect class="bxb" x="170" y="40" width="140" height="22" rx="3"/>
+  <text class="tm" x="160" y="85" text-anchor="end">task 2</text><rect class="bxb" x="184" y="70" width="133" height="22" rx="3"/>
+  <text class="tm" x="160" y="115" text-anchor="end">task 3</text><rect class="bxb" x="191" y="100" width="140" height="22" rx="3"/>
+  <text class="ts" x="172" y="142">⋮ tasks 4–96 done by ~25 s</text>
+  <text class="tm" x="160" y="167" text-anchor="end">task 97 (bad node)</text>
+  <rect class="bxr" x="170" y="152" width="350" height="22" rx="3"/>
+  <rect class="bx dash" x="520" y="152" width="210" height="22" rx="3" style="fill:none"/>
+  <text class="ts" x="625" y="167" text-anchor="middle">would have run to 80 s</text>
+  <text class="tm" x="160" y="199" text-anchor="end">task 97 copy</text>
+  <rect class="bxo" x="380" y="184" width="140" height="22" rx="3"/>
+  <text class="ts" x="528" y="199">copy wins at 50 s; original killed</text>
+  <line class="ln" x1="170" y1="226" x2="765" y2="226"/>
+  <text class="tm" x="170" y="246" text-anchor="middle">0 s</text>
+  <text class="tm" x="310" y="246" text-anchor="middle">20 s</text>
+  <text class="tm" x="450" y="246" text-anchor="middle">40 s</text>
+  <text class="tm" x="590" y="246" text-anchor="middle">60 s</text>
+  <text class="tm" x="730" y="246" text-anchor="middle">80 s</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <h3>When a task counts as a straggler</h3>
+  <p>Spark checks every <code>spark.speculation.interval</code> (100 ms). A running task gets a copy when both are true:</p>
+  <ol>
+    <li>At least <code>spark.speculation.quantile</code> (75%) of the stage's tasks have finished, and</li>
+    <li>the task has been running longer than <code>spark.speculation.multiplier</code> (1.5) × the median duration of finished tasks.</li>
+  </ol>
+<pre><code><span class="k">spark.speculation</span>=true
+spark.speculation.multiplier=1.5       <span class="muted"># raise to 2–3 to be less aggressive</span>
+spark.speculation.quantile=0.75
+spark.speculation.minTaskRuntime=100ms <span class="muted"># don't speculate on very short tasks</span></code></pre>
+
+  <div class="callout trap"><div class="lbl">Classic trick question: does speculation fix skew?</div>No. A skewed task is slow because its partition holds far more data. The copy gets the <b>same partition</b>, so it's just as slow, and you've wasted a core. Speculation helps only when the <b>machine</b> is the problem, not the <b>data</b>. Tell them apart in the Spark UI: a skewed task has a much larger <i>Shuffle Read Size</i> than its peers; a bad-node task has normal input but a long duration, often with others on the same host.</div>
+
+  <h3>Risks</h3>
+  <ul>
+    <li><b>Duplicate side effects.</b> If a task writes to an external system (a JDBC insert in <code>foreachPartition</code>, an API call, sending messages), both copies may write. File and table writes are protected by Spark's output committer; custom writes aren't. Make them idempotent or keep speculation off.</li>
+    <li><b>Wasted capacity.</b> Every copy takes a slot that real work could use. On a busy cluster, aggressive settings slow everything down.</li>
+    <li><b>Hidden root cause.</b> Speculation can mask a sick node for weeks. Watch for the same host repeatedly producing stragglers and fix or exclude it.</li>
+  </ul>
+  <div class="callout say"><div class="lbl">Say it in an interview</div>"Speculation re-launches a task that's running much slower than its peers once most of the stage is done: by default 1.5 times the median after 75% of tasks finish. Whichever copy finishes first wins. It helps with bad nodes, not skew, because the copy gets the same data. I'd avoid it when tasks write to non-idempotent external systems."</div>
+
+  <section id="modes">
+    <h2>Client vs cluster deploy mode</h2>
+    <div class="tbl"><table>
+      <thead><tr><th></th><th>Client mode</th><th>Cluster mode</th></tr></thead>
+      <tbody>
+        <tr><td>Where the driver runs</td><td>On the machine that ran spark-submit (or the notebook host)</td><td>Inside the cluster, on a node the cluster manager picks</td></tr>
+        <tr><td>Good for</td><td>Interactive work, notebooks, debugging</td><td>Scheduled production jobs</td></tr>
+        <tr><td>Risk</td><td>If the laptop or edge node disconnects, the job dies; network latency to executors</td><td>Logs live in the cluster, so it's harder to watch interactively</td></tr>
+      </tbody></table></div>
+    <p class="small muted">On Databricks you don't choose this: each cluster has a driver node and worker nodes, with one executor per worker. You tune by choosing instance types and worker counts.</p>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>Your 64 GB executors have 16 cores each and spill constantly. What would you change first, and why?</summary><div>Fewer cores per executor (for example 4–5), with more executors. Each task currently gets roughly 64 × 0.6 ÷ 16 ≈ 2.3 GB of pool; at 4 cores it's about 9 GB. Very large heaps also mean longer GC pauses.</div></details>
+      <details><summary>Dynamic allocation is on, but executors never scale down. Why?</summary><div>Most likely they hold cached data (<code>cachedExecutorIdleTimeout</code> is infinite by default), or shuffle tracking is keeping them because a later stage still needs their shuffle files. Unpersist cached data you no longer need, or set a finite cached idle timeout.</div></details>
+      <details><summary>Why does dynamic allocation need an external shuffle service or shuffle tracking?</summary><div>Shuffle output lives on executors' local disks. Removing an executor without either feature would lose shuffle files that the next stage needs, forcing recomputation of the parent stage.</div></details>
+      <details><summary>One task in a stage takes 10× the median. Speculation or salting?</summary><div>Check its Shuffle Read Size first. If it's 10× the median too, it's skew: salting, AQE skew join or broadcast. If its input is normal, it's the node: speculation helps, and you should look at that host.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Architecture overview</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues: executor memory</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  function gb(x){return x>=10?x.toFixed(1)+" GB":x.toFixed(2)+" GB"}
+  function calc(){
+    const heap=Math.max(1,+$("mem").value||1), cores=Math.max(1,+$("cores").value||1), f=+$("ovf").value;
+    const reserved=0.3, usable=Math.max(0,heap-reserved), pool=usable*0.6, user=usable*0.4, stor=pool*0.5, exec=pool*0.5;
+    const ovh=Math.max(0.384,heap*f), total=heap+ovh;
+    const segs=[["m-res","Reserved",reserved],["m-user","User",user],["m-stor","Storage",stor],["m-exec","Execution",exec],["m-ovh","Overhead",ovh]];
+    $("membar").innerHTML=segs.map(([c,l,v])=>`<div class="${c}" style="flex:${v}" title="${l}: ${gb(v)}"><span>${l}</span><b>${gb(v)}</b></div>`).join("");
+    $("memout").innerHTML=[
+      [gb(total),"container asks for (heap + overhead)"],
+      [gb(pool),"unified pool (execution + storage)"],
+      [gb(pool/cores),"max execution memory per task (no cache)"],
+      [gb(exec/cores),"per task with cache at its protected half"]
+    ].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("");
+  }
+  ["mem","cores","ovf"].forEach(id=>$(id).addEventListener("input",calc));calc();
+})();
+</script>
+</body></html>

@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="index.html" aria-current="page">1 · Architecture</a>
+    <a href="../../spark-execution.html">2 · Execution</a>
+    <a href="../../spark-optimizer.html">3 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">4 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">Architecture &amp; memory</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 1 of 4 · Overview</p>
+  <h1>Who does what in a Spark application</h1>
+  <p class="lede">A 10-minute refresher: the parts of a Spark application, the units of work they run, and how executor memory is divided. Use the deep-dive and production pages when you need more.</p>
+  <div class="toc">
+    <a href="#components">Components</a><a href="#hierarchy">Jobs, stages, tasks</a><a href="#memory">Memory</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="components">
+    <h2>The three moving parts</h2>
+    <p>A Spark <b>application</b> is one <b>driver</b> plus the <b>executors</b> it gets from a <b>cluster manager</b>. The driver plans the work and schedules tasks. Executors are JVM processes on worker nodes that run those tasks, one per core, and hold shuffle files and cached data. The cluster manager only hands out machines; it doesn't schedule tasks.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 420" role="img" aria-labelledby="archT">
+  <title id="archT">Spark architecture: driver, cluster manager and two worker nodes with executors</title>
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="a1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <!-- driver -->
+  <rect class="bx" x="20" y="30" width="260" height="360" rx="10"/>
+  <text class="th" x="40" y="60">Driver</text><text class="ts" x="110" y="60">one JVM, plans the work</text>
+  <rect class="bx2" x="40" y="78" width="220" height="58" rx="6"/><text class="tb" x="54" y="102">Your application code</text><text class="ts" x="54" y="122">main(), DataFrame API, SQL</text>
+  <rect class="bx2" x="40" y="148" width="220" height="58" rx="6"/><text class="tb" x="54" y="172">SparkSession</text><text class="ts" x="54" y="192">entry point, catalog, config</text>
+  <rect class="bxa" x="40" y="218" width="220" height="58" rx="6"/><text class="tb" x="54" y="242">DAG scheduler</text><text class="ts" x="54" y="262">splits a job into stages at shuffles</text>
+  <rect class="bxa" x="40" y="288" width="220" height="58" rx="6"/><text class="tb" x="54" y="312">Task scheduler</text><text class="ts" x="54" y="332">sends one task per partition to a free core</text>
+  <!-- cluster manager -->
+  <rect class="bxb" x="340" y="160" width="180" height="96" rx="10"/>
+  <text class="tb" x="430" y="196" text-anchor="middle">Cluster manager</text>
+  <text class="ts" x="430" y="218" text-anchor="middle">YARN · Kubernetes</text>
+  <text class="ts" x="430" y="236" text-anchor="middle">Standalone · Databricks</text>
+  <!-- workers -->
+  <g>
+    <rect class="bx" x="580" y="30" width="300" height="172" rx="10"/>
+    <text class="tb" x="596" y="54">Worker node 1</text>
+    <rect class="bx2" x="596" y="66" width="268" height="122" rx="6"/>
+    <text class="tb" x="610" y="88">Executor (JVM)</text><text class="ts" x="736" y="88">4 cores = 4 slots</text>
+    <rect class="bxb" x="610" y="100" width="54" height="34" rx="4"/><text class="tm" x="637" y="122" text-anchor="middle">task</text>
+    <rect class="bxb" x="670" y="100" width="54" height="34" rx="4"/><text class="tm" x="697" y="122" text-anchor="middle">task</text>
+    <rect class="bxb" x="730" y="100" width="54" height="34" rx="4"/><text class="tm" x="757" y="122" text-anchor="middle">task</text>
+    <rect class="bx" x="790" y="100" width="54" height="34" rx="4"/><text class="tm" x="817" y="122" text-anchor="middle">idle</text>
+    <rect class="bx" x="610" y="144" width="234" height="32" rx="4"/><text class="ts" x="622" y="165">cached blocks · shuffle files on local disk</text>
+  </g>
+  <g>
+    <rect class="bx" x="580" y="218" width="300" height="172" rx="10"/>
+    <text class="tb" x="596" y="242">Worker node 2</text>
+    <rect class="bx2" x="596" y="254" width="268" height="122" rx="6"/>
+    <text class="tb" x="610" y="276">Executor (JVM)</text><text class="ts" x="736" y="276">4 cores = 4 slots</text>
+    <rect class="bxb" x="610" y="288" width="54" height="34" rx="4"/><text class="tm" x="637" y="310" text-anchor="middle">task</text>
+    <rect class="bxb" x="670" y="288" width="54" height="34" rx="4"/><text class="tm" x="697" y="310" text-anchor="middle">task</text>
+    <rect class="bx" x="730" y="288" width="54" height="34" rx="4"/><text class="tm" x="757" y="310" text-anchor="middle">idle</text>
+    <rect class="bx" x="790" y="288" width="54" height="34" rx="4"/><text class="tm" x="817" y="310" text-anchor="middle">idle</text>
+    <rect class="bx" x="610" y="332" width="234" height="32" rx="4"/><text class="ts" x="622" y="353">cached blocks · shuffle files on local disk</text>
+  </g>
+  <!-- arrows -->
+  <line class="ln" x1="280" y1="208" x2="336" y2="208" marker-end="url(#a1)"/>
+  <line class="ln" x1="520" y1="190" x2="576" y2="128" marker-end="url(#a1)"/>
+  <line class="ln" x1="520" y1="228" x2="576" y2="290" marker-end="url(#a1)"/>
+  <path class="lna" d="M280,70 C420,10 500,10 578,64" marker-start="url(#a1a)" marker-end="url(#a1a)"/>
+  <path class="lna" d="M280,370 C420,412 500,412 578,360" marker-start="url(#a1a)" marker-end="url(#a1a)"/>
+  <circle class="dot" cx="308" cy="208" r="11"/><text class="dott" x="308" y="212" text-anchor="middle">1</text>
+  <circle class="dot" cx="548" cy="160" r="11"/><text class="dott" x="548" y="164" text-anchor="middle">2</text>
+  <circle class="dot" cx="548" cy="258" r="11"/><text class="dott" x="548" y="262" text-anchor="middle">2</text>
+  <rect x="428" y="16" width="48" height="22" rx="11" style="fill:var(--accent)"/><text class="dott" x="452" y="31" text-anchor="middle">3–5</text>
+  <rect x="428" y="388" width="48" height="22" rx="11" style="fill:var(--accent)"/><text class="dott" x="452" y="403" text-anchor="middle">3–5</text>
+</svg>
+<ol class="rail small" style="margin-top:1rem">
+  <li><div>The driver asks the cluster manager for executors (fixed count, or dynamic allocation).</div></li>
+  <li><div>The cluster manager starts executor JVMs on worker nodes with the requested cores and memory.</div></li>
+  <li><div>Executors register back with the driver. From now on the driver talks to them directly.</div></li>
+  <li><div>For each stage, the task scheduler sends tasks (your serialised code plus one partition to work on) to free cores, preferring executors that already hold that data.</div></li>
+  <li><div>Executors report status and send small results back. Shuffle files and cached data stay on the executors.</div></li>
+</ol>
+</div></div>
+
+<div class="wrap">
+  <section id="hierarchy">
+    <h2>Jobs, stages and tasks</h2>
+    <p><b>An action creates a job, shuffles split the job into stages, and each stage runs one task per partition on executor cores.</b> The driver does all the planning; executors only ever see tasks.</p>
+<pre class="tree"><code>Application   one SparkSession: driver + executors
+└─ Job        one per action (count, write, collect)    ← created by the driver
+   └─ Stage   a new one at every shuffle                ← cut by the DAG scheduler
+      └─ Task one per partition, one core each          ← run by executors</code></pre>
+    <p class="small muted">Module 2 walks a real pipeline through this: <a href="../../spark-execution.html#jobs">Jobs, stages and tasks for our pipeline →</a></p>
+  </section>
+
+  <section id="memory">
+    <h2>Executor memory at a glance</h2>
+    <p>Think of an executor as a shared office floor. The cluster manager rents you the whole floor (the container). Spark carves it into fixed areas, and one area, the <b>unified pool</b>, is shared by every task running on that executor's cores. Example: <code>spark.executor.memory=16g</code>, 4 cores, defaults.</p>
+<pre class="tree"><code>Container (what YARN / Kubernetes allocates)             17.6 GB
+├─ Overhead, off-heap: JVM internals, network, Python      1.6 GB   max(384 MB, 10% of heap)
+└─ JVM heap = spark.executor.memory                        16 GB
+   ├─ Reserved for Spark internals                         0.3 GB   fixed
+   ├─ User memory: your objects, UDF data structures       6.3 GB   40% of the rest
+   └─ Unified pool                                         9.4 GB   60% of the rest
+      ├─ Storage: cache, broadcast variables              ~4.7 GB   ┐ soft boundary,
+      └─ Execution: shuffle, join, sort, aggregate        ~4.7 GB   ┘ can move</code></pre>
+    <ul>
+      <li><b>Execution can evict cache</b> (down to the protected half), but <b>cache can't evict execution</b>. Losing cache only costs a recompute; losing a running join's memory would break the task.</li>
+      <li><b>Memory per task ≈ pool ÷ cores.</b> Here about 2.35 GB per task with no cache, 1.2 GB if cache holds its half. Going past that means <b>spill</b> (slow) or <b>OutOfMemoryError</b>.</li>
+      <li><b>"Java heap space"</b> means the heap ran out. <b>"Container killed … exceeding memory limits"</b> means overhead ran out (often Python). Different causes, different fixes.</li>
+    </ul>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Fact</th><th>Rule or default</th></tr></thead>
+      <tbody>
+        <tr><td>Slot</td><td>One executor core runs one task at a time. Total slots = executors × cores.</td></tr>
+        <tr><td>Waves</td><td>Tasks ÷ slots. Stage time ≈ waves × task time, and never less than the slowest task.</td></tr>
+        <tr><td>Deploy mode</td><td><b>Client:</b> driver on the submitting machine (interactive). <b>Cluster:</b> driver inside the cluster (production).</td></tr>
+        <tr><td>Reserved memory</td><td>300 MB, fixed</td></tr>
+        <tr><td><code>spark.memory.fraction</code></td><td>0.6 of (heap − 300 MB) forms the unified pool</td></tr>
+        <tr><td><code>spark.memory.storageFraction</code></td><td>0.5 of the pool is protected for cache</td></tr>
+        <tr><td><code>spark.executor.memoryOverhead</code></td><td>max(384 MB, 10% of heap), outside the heap</td></tr>
+        <tr><td>Memory per task</td><td>≈ unified pool ÷ cores per executor</td></tr>
+        <tr><td>Dynamic allocation</td><td>Adds executors when tasks wait over 1 s; removes them after 60 s idle. Needs a shuffle service or shuffle tracking.</td></tr>
+        <tr><td>Speculation</td><td>Off by default. Re-runs a task slower than 1.5 × median once 75% of the stage is done. Doesn't fix skew.</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Architecture</div>"The driver builds the plan and schedules tasks; executors are JVMs on worker nodes that run those tasks in parallel, one per core, and hold shuffle files and cached data. The cluster manager only allocates resources."</div>
+    <div class="callout say"><div class="lbl">Jobs, stages, tasks</div>"An action creates a job. The DAG scheduler starts a new stage at every shuffle, so stages are runs of narrow transformations. Each stage runs one task per partition, so partitions decide parallelism."</div>
+    <div class="callout say"><div class="lbl">Memory</div>"Executor memory is the heap plus off-heap overhead. After 300 MB reserved, 60% of the heap is a unified pool shared by execution and storage, where execution can evict cache but not the reverse. Memory per task is roughly that pool divided by cores, and that decides whether a task spills or fails."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Does the cluster manager schedule tasks?</summary><div>No. It only allocates containers or pods for executors. The driver's DAG scheduler and task scheduler decide what runs where.</div></details>
+      <details><summary>10 executors × 4 cores, a stage of 1,000 tasks taking 20 s each. How long?</summary><div>40 slots, so 25 waves × 20 s ≈ 500 s, roughly 8–9 minutes. More slots is the main lever; one skewed task sets a floor no cluster size can beat. <a href="deep-dive.html#waves">See the wave timeline →</a></div></details>
+      <details><summary>"Container killed by YARN for exceeding memory limits." Heap or overhead?</summary><div>Overhead. The process as a whole went over the container limit, usually because of Python workers or off-heap buffers. Raise <code>spark.executor.memoryOverhead</code> or reduce Python memory use. <a href="production.html#container-killed">Full scenario →</a></div></details>
+      <details><summary>A 16 GB, 4-core executor spills heavily. Two fixes that don't add memory?</summary><div>Use more shuffle partitions so each task handles less data, or drop to 2 cores per executor so each task gets about twice the memory. Check for skew first.</div></details>
+      <details><summary>Does speculative execution fix data skew?</summary><div>No. A skewed task is slow because its partition is bigger. The copy gets the same partition and is just as slow. Speculation only helps when the machine is the problem. <a href="deep-dive.html#speculation">Why →</a></div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html">
+        <span class="n">Deep dive</span><b>Slots, memory internals, dynamic allocation &amp; speculation</b>
+        <p>Wave timeline, the memory layout drawn to scale with a calculator, how executors are added and removed, how stragglers get a backup copy, and deploy modes.</p>
+      </a>
+      <a class="mod" href="production.html">
+        <span class="n">Production issues</span><b>Executor memory: failures and fixes</b>
+        <p>Eight common memory failures, each with the real error, how to confirm it, the fix, prevention and an interview answer. Plus a mitigation cheat sheet.</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../index.html"><span>Back</span><b>Spark Core</b></a>
+    <a href="../../spark-execution.html"><span>Next · Module 2</span><b>Execution flow &amp; lazy evaluation</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const KEY="de-learning-done-v1",items=[[0,"Spark architecture: driver, executors, cluster manager"],[1,"Executor memory model (unified memory, overhead)"],[2,"Dynamic allocation and speculative execution"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

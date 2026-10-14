@@ -10,7 +10,7 @@
   <a class="brand" href="index.html"><i></i>DE Learning</a>
   <nav class="mods" aria-label="Spark Core modules">
     <a href="index.html" aria-current="page">Hub</a>
-    <a href="spark-architecture.html">1 · Architecture</a>
+    <a href="spark/architecture/index.html">1 · Architecture</a>
     <a href="spark-execution.html">2 · Execution</a>
     <a href="spark-optimizer.html">3 · Optimizer &amp; AQE</a>
     <a href="spark-tuning.html">4 · Tuning &amp; debug</a>
@@ -33,9 +33,9 @@
       <h2>Spark Core path</h2>
       <p class="muted">Four pages, in order. Each one goes concept → picture → worked example → what breaks → how you would say it in an interview. Plan about 45–60 minutes per page.</p>
       <div class="paths">
-        <a class="mod" href="spark-architecture.html" data-mod="arch">
+        <a class="mod" href="spark/architecture/index.html" data-mod="arch">
           <span class="n">Module 1</span><b>Architecture &amp; memory</b>
-          <p>Driver, executors, cluster manager, slots, the unified memory model, dynamic allocation.</p>
+          <p>Driver, executors, jobs/stages/tasks, the memory model. Deep dive on dynamic allocation and speculation; production memory failures.</p>
           <div class="ft"><span>≈45 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
         <a class="mod" href="spark-execution.html" data-mod="exec">
@@ -75,12 +75,12 @@
 </main>
 
 <script>
-const A="spark-architecture.html",E="spark-execution.html",O="spark-optimizer.html",T="spark-tuning.html";
+const A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark-execution.html",O="spark-optimizer.html",T="spark-tuning.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
   ["Executor memory model (unified memory, overhead)",A+"#memory","arch"],
-  ["Dynamic allocation and speculative execution",A+"#dynamic","arch"],
+  ["Dynamic allocation and speculative execution",D+"#dynamic","arch"],
   ["Spark execution flow from spark-submit to job completion",E+"#submit","exec"],
   ["Lazy evaluation, lineage and RDD immutability",E+"#lazy","exec"],
   ["Narrow vs wide transformations and stage boundaries",E+"#narrow-wide","exec"],
