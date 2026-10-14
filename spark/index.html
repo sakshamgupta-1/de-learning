@@ -9,10 +9,12 @@
   <a class="brand" href="../index.html"><i></i>DE Learning</a>
   <nav class="mods" aria-label="Spark Core modules">
     <a href="../index.html">Hub</a>
+    <a href="mapreduce/index.html">Background</a>
     <a href="architecture/index.html">1 · Architecture</a>
-    <a href="../spark-execution.html">2 · Execution</a>
-    <a href="../spark-optimizer.html">3 · Optimizer &amp; AQE</a>
-    <a href="../spark-tuning.html">4 · Tuning &amp; debug</a>
+    <a href="data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../spark-execution.html">3 · Execution</a>
+    <a href="../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../spark-tuning.html">5 · Tuning &amp; debug</a>
   </nav>
 </div></header>
 
@@ -20,26 +22,36 @@
   <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Hub</a><span class="sep">›</span><span aria-current="page">Spark Core</span></nav>
   <p class="eyebrow">Learning path</p>
   <h1>Spark Core</h1>
-  <p class="lede">Four modules, in order. Each starts with a short overview you can reread before an interview; deeper pages hang off it.</p>
+  <p class="lede">A short background page and five modules, in order. Each starts with a short overview you can reread before an interview; deeper pages hang off it.</p>
 
   <div class="paths" style="margin-top:1.5rem">
+    <a class="mod" href="mapreduce/index.html">
+      <span class="n">Background</span><b>Hadoop &amp; MapReduce</b>
+      <p>HDFS, YARN and MapReduce; how a MapReduce job runs; what Spark solved and what lives on in Spark. Optional if you know it.</p>
+      <div class="ft"><span>Overview</span></div>
+    </a>
     <a class="mod" href="architecture/index.html">
       <span class="n">Module 1</span><b>Architecture &amp; memory</b>
       <p>Driver, executors, jobs/stages/tasks, the memory model. Deep dive and production memory failures.</p>
       <div class="ft"><span>Overview · Deep dive · Production</span></div>
     </a>
+    <a class="mod" href="data-abstractions/index.html">
+      <span class="n">Module 2</span><b>RDD, DataFrame, Dataset &amp; pandas</b>
+      <p>Where each runs, why DataFrames beat RDDs, Spark vs pandas, and the problems at the boundary.</p>
+      <div class="ft"><span>Overview · Examples · Production</span></div>
+    </a>
     <a class="mod" href="../spark-execution.html">
-      <span class="n">Module 2</span><b>Execution flow &amp; lazy evaluation</b>
+      <span class="n">Module 3</span><b>Execution flow &amp; lazy evaluation</b>
       <p>spark-submit to completion, plan building, narrow vs wide, jobs → stages → tasks.</p>
       <div class="ft"><span>Single page · moving to new layout</span></div>
     </a>
     <a class="mod" href="../spark-optimizer.html">
-      <span class="n">Module 3</span><b>Catalyst, joins &amp; AQE</b>
+      <span class="n">Module 4</span><b>Catalyst, joins &amp; AQE</b>
       <p>Optimizer phases, pushdown and pruning, reading explain(), join strategies, AQE, UDF cost.</p>
       <div class="ft"><span>Single page · moving to new layout</span></div>
     </a>
     <a class="mod" href="../spark-tuning.html">
-      <span class="n">Module 4</span><b>Performance tuning &amp; debugging</b>
+      <span class="n">Module 5</span><b>Performance tuning &amp; debugging</b>
       <p>Debug flow, six failure scenarios, shuffle reduction, partition and executor sizing.</p>
       <div class="ft"><span>Single page · moving to new layout</span></div>
     </a>
@@ -47,7 +59,7 @@
 
   <nav class="next">
     <a href="../index.html"><span>Back</span><b>Hub</b></a>
-    <a href="architecture/index.html"><span>Start</span><b>Module 1 · Architecture</b></a>
+    <a href="mapreduce/index.html"><span>Start</span><b>Background · Hadoop &amp; MapReduce</b></a>
   </nav>
 </div></main>
 </body></html>

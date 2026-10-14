@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RDD vs DataFrame vs pandas</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="index.html" aria-current="page">2 · RDD &amp; DataFrames</a>
+    <a href="../../spark-execution.html">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">RDD, DataFrame, Dataset &amp; pandas</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 2 of 5 · Overview</p>
+  <h1>RDD, DataFrame, Dataset and pandas</h1>
+  <p class="lede">Five ways to hold tabular data when you work with PySpark: where each one runs, why DataFrames are faster than RDDs, and when pandas is the right tool. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#map">The big picture</a><a href="#compare">Side by side</a><a href="#why-faster">Why DataFrames win</a><a href="#when-rdd">When RDDs still fit</a><a href="#spark-vs-pandas">Spark vs pandas</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="map">
+    <h2>The big picture</h2>
+    <p>The <b>RDD</b> is Spark's original, low-level API: a distributed collection of objects that you transform with your own functions. <b>DataFrames</b> (and <b>Datasets</b> in Scala and Java) add a schema of named, typed columns, which lets Spark understand and optimise your query. Today they're the default; RDDs still run underneath as the execution engine.</p>
+    <p><b>pandas</b> is a different world: a single-machine, in-memory, eager library. It's excellent for data that fits on one machine, and the two worlds meet through <code>toPandas()</code>, pandas UDFs and the pandas API on Spark.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 920 360" role="img" aria-labelledby="absT">
+  <title id="absT">Spark cluster APIs layered over the Catalyst optimiser and RDD engine, beside a single-machine pandas DataFrame, connected by toPandas and createDataFrame</title>
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <rect class="bx" x="20" y="20" width="520" height="326" rx="10"/>
+  <text class="tb" x="36" y="44">Spark cluster</text><text class="ts" x="140" y="44">distributed · lazy · immutable</text>
+
+  <rect class="bxb" x="36" y="58" width="238" height="54" rx="6"/>
+  <text class="tb" x="155" y="81" text-anchor="middle">DataFrame · Spark SQL</text>
+  <text class="ts" x="155" y="100" text-anchor="middle">Python, Scala, Java, R, SQL</text>
+  <rect class="bxb" x="286" y="58" width="238" height="54" rx="6"/>
+  <text class="tb" x="405" y="81" text-anchor="middle">Dataset[T]</text>
+  <text class="ts" x="405" y="100" text-anchor="middle">Scala and Java only · typed</text>
+
+  <rect class="bxb" x="36" y="122" width="238" height="54" rx="6"/>
+  <text class="tb" x="155" y="145" text-anchor="middle">pandas API on Spark</text>
+  <text class="ts" x="155" y="164" text-anchor="middle">pandas syntax, runs as DataFrames</text>
+  <rect class="bxb" x="286" y="122" width="238" height="54" rx="6"/>
+  <text class="tb" x="405" y="145" text-anchor="middle">pandas UDFs</text>
+  <text class="ts" x="405" y="164" text-anchor="middle">your pandas code on executors</text>
+
+  <line class="ln" x1="280" y1="180" x2="280" y2="196" marker-end="url(#b1)"/>
+  <rect class="bxa" x="36" y="200" width="488" height="54" rx="6"/>
+  <text class="tb" x="280" y="223" text-anchor="middle">Catalyst optimiser + Tungsten</text>
+  <text class="ts" x="280" y="242" text-anchor="middle">sees columns and types → pushdown, pruning, join choice, compact binary rows</text>
+
+  <line class="ln" x1="280" y1="258" x2="280" y2="274" marker-end="url(#b1)"/>
+  <rect class="bx2" x="36" y="278" width="488" height="54" rx="6"/>
+  <text class="tb" x="280" y="301" text-anchor="middle">RDD: the execution engine underneath</text>
+  <text class="ts" x="280" y="320" text-anchor="middle">RDD code you write yourself skips the optimiser; Python lambdas run row by row</text>
+
+  <rect class="bx" x="700" y="20" width="200" height="326" rx="10"/>
+  <text class="tb" x="716" y="44">One machine</text><text class="ts" x="716" y="62">eager · in memory · mutable</text>
+  <rect class="bxo" x="712" y="104" width="176" height="110" rx="6"/>
+  <text class="tb" x="800" y="132" text-anchor="middle">pandas DataFrame</text>
+  <text class="ts" x="800" y="156" text-anchor="middle">all rows in one</text>
+  <text class="ts" x="800" y="174" text-anchor="middle">process's memory</text>
+  <text class="ts" x="800" y="198" text-anchor="middle">each line runs now</text>
+  <text class="ts" x="800" y="290" text-anchor="middle">Apache Arrow makes</text>
+  <text class="ts" x="800" y="308" text-anchor="middle">both directions fast</text>
+
+  <line class="lna" x1="540" y1="134" x2="708" y2="134" marker-end="url(#b2)"/>
+  <text class="ts ta" x="620" y="126" text-anchor="middle">toPandas()</text>
+  <text class="ts" x="620" y="150" text-anchor="middle">every row to the driver</text>
+  <line class="ln" x1="708" y1="190" x2="544" y2="190" marker-end="url(#b1)"/>
+  <text class="ts" x="620" y="182" text-anchor="middle">createDataFrame(pdf)</text>
+  <text class="ts" x="620" y="206" text-anchor="middle">pandas → Spark</text>
+</svg>
+<p class="cap">Everything on the left is distributed and planned by Catalyst before it runs, except RDD code you write directly. pandas on the right lives in one process. Moving data across the gap is where most memory problems start.</p>
+</div></div>
+
+<div class="wrap">
+  <section id="compare">
+    <h2>Side by side</h2>
+  </section>
+</div>
+<div class="wide">
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>RDD</th><th>DataFrame</th><th>Dataset[T]</th><th>pandas DataFrame</th><th>pandas API on Spark</th></tr></thead>
+    <tbody>
+      <tr><td><b>Runs on</b></td><td>Cluster</td><td>Cluster</td><td>Cluster</td><td>One machine</td><td>Cluster</td></tr>
+      <tr><td><b>Evaluation</b></td><td>Lazy</td><td>Lazy</td><td>Lazy</td><td>Eager</td><td>Lazy (most operations)</td></tr>
+      <tr><td><b>Structure</b></td><td>Opaque objects, no schema</td><td>Named columns; types checked when the query is analysed</td><td>Typed objects; types checked at compile time</td><td>Columns plus an index</td><td>Columns plus an index</td></tr>
+      <tr><td><b>Optimised by Catalyst</b></td><td>No</td><td>Yes</td><td>Column expressions yes; typed lambdas only partly</td><td>No optimiser</td><td>Yes (translated to DataFrame plans)</td></tr>
+      <tr><td><b>Languages</b></td><td>Scala, Java, Python</td><td>Python, Scala, Java, R, SQL</td><td>Scala, Java</td><td>Python</td><td>Python</td></tr>
+      <tr><td><b>Mutable?</b></td><td>No</td><td>No</td><td>No</td><td>Yes</td><td>Pandas-like syntax; immutable underneath</td></tr>
+      <tr><td><b>Data size</b></td><td>Any</td><td>Any</td><td>Any</td><td>Must fit in one machine's memory</td><td>Any</td></tr>
+      <tr><td><b>Best for</b></td><td>Low-level control, unstructured data, legacy code</td><td>Almost everything</td><td>Typed Scala/Java pipelines</td><td>Small data, local analysis, ML and plotting libraries</td><td>pandas users moving to big data</td></tr>
+    </tbody></table></div>
+  <p class="small muted" style="max-width:46rem;margin-inline:auto">In Scala and Java, a DataFrame <i>is</i> a <code>Dataset[Row]</code>. Python and R have no Dataset API because they have no compile-time types to check.</p>
+</div>
+
+<div class="wrap">
+  <section id="why-faster">
+    <h2>Why DataFrames beat RDDs</h2>
+    <ul>
+      <li><b>Spark can see what you mean.</b> With <code>filter(col("country") == "AE")</code> Catalyst knows the column and the condition, so it can push the filter into the Parquet reader and read only the columns you use. An RDD <code>lambda</code> is a black box: Spark must read every row and every column and hand them to your function.</li>
+      <li><b>Compact memory format.</b> Tungsten stores DataFrame rows as packed binary data, not one JVM object per row, which means less memory, less garbage collection and generated code that runs close to the CPU.</li>
+      <li><b>In PySpark the gap is largest.</b> DataFrame operations run entirely inside the JVM. RDD lambdas written in Python force every row to be serialised (pickled), sent to a Python worker process, processed, and sent back.</li>
+    </ul>
+    <p>Spark SQL and the DataFrame API compile to the same plan, so they perform the same. The choice between them is style, not speed.</p>
+  </section>
+
+  <section id="when-rdd">
+    <h2>When RDDs still fit</h2>
+    <ul>
+      <li>Truly unstructured data where no schema makes sense, or record parsing that needs full control.</li>
+      <li>Fine-grained control over partitioning or physical placement that the DataFrame API doesn't expose.</li>
+      <li>Maintaining legacy code. For new code, <code>mapInPandas</code> or <code>applyInPandas</code> usually covers "I need my own function" cases with better performance.</li>
+    </ul>
+    <div class="callout trap"><div class="lbl">Modern platforms are dropping RDD access</div><b>Spark Connect</b> (Spark 3.4+) and Databricks serverless and shared-access compute don't support the RDD API or <code>sparkContext</code>. Code that relies on <code>df.rdd</code> won't run there. One more reason to stay on DataFrames.</div>
+  </section>
+
+  <section id="spark-vs-pandas">
+    <h2>Spark DataFrame vs pandas DataFrame</h2>
+    <div class="tbl"><table>
+      <thead><tr><th></th><th>Spark DataFrame</th><th>pandas DataFrame</th></tr></thead>
+      <tbody>
+        <tr><td>Scale</td><td>Distributed across executors; any size</td><td>One process; limited by that machine's RAM</td></tr>
+        <tr><td>Execution</td><td>Lazy: builds a plan, runs on an action</td><td>Eager: every line runs immediately</td></tr>
+        <tr><td>Changes</td><td>Immutable: each transformation returns a new DataFrame</td><td>Mutable: <code>df["x"] = …</code> changes it in place</td></tr>
+        <tr><td>Row order and index</td><td>No index; row order isn't guaranteed without <code>orderBy</code></td><td>Labelled index; order is preserved</td></tr>
+        <tr><td>Where pandas code runs in a Spark job</td><td colspan="2">After <code>toPandas()</code>: on the <b>driver</b>, with all the data. Inside a pandas UDF: on <b>executors</b>, one batch or group at a time.</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">RDD vs DataFrame vs Dataset</div>"An RDD is a distributed collection of objects transformed with arbitrary functions, so Spark can't optimise it. A DataFrame adds a schema, so Catalyst can push down filters, prune columns, choose joins and Tungsten can store rows compactly. A Dataset is the typed version for Scala and Java, with compile-time checks; a DataFrame is Dataset[Row]. I use DataFrames by default and RDDs only for low-level cases."</div>
+    <div class="callout say"><div class="lbl">Why DataFrames are faster in PySpark</div>"DataFrame operations stay in the JVM and are optimised as a whole plan. Python RDD lambdas send every row through pickling to Python worker processes and back, and Spark can't see inside them to push down filters or prune columns."</div>
+    <div class="callout say"><div class="lbl">Spark vs pandas</div>"Spark DataFrames are distributed, lazy and immutable; pandas DataFrames are single-machine, eager and mutable. toPandas collects everything to the driver, so I use it only on small results, with Arrow enabled. For pandas logic at scale I use pandas UDFs or the pandas API on Spark."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Why is there no Dataset API in PySpark?</summary><div>Datasets exist to give compile-time type safety through JVM classes. Python is dynamically typed, so there's nothing to check at compile time; a PySpark DataFrame already covers the same ground.</div></details>
+      <details><summary>A colleague converts a DataFrame to an RDD to apply a Python lambda, then back with <code>toDF()</code>. What's lost?</summary><div>Optimisation across that boundary (no pushdown or pruning through the lambda), Tungsten's compact format, and speed, since every row is pickled to Python and back. Built-in functions, or a pandas UDF / <code>mapInPandas</code>, avoid most of that. It also won't run on Spark Connect.</div></details>
+      <details><summary>Is a Spark SQL query faster than the same DataFrame code?</summary><div>No. Both produce the same logical plan and go through Catalyst identically.</div></details>
+      <details><summary>Where does pandas code run in a Spark application?</summary><div>After <code>toPandas()</code>, on the driver, with the full result in memory. Inside a pandas UDF, <code>mapInPandas</code> or <code>applyInPandas</code>, on executors, one Arrow batch or group at a time.</div></details>
+      <details><summary>Is the pandas API on Spark just pandas running on the driver?</summary><div>No. It translates pandas-style calls into Spark DataFrame plans that run distributed. Only <code>to_pandas()</code> brings data to the driver.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="examples.html">
+        <span class="n">Examples</span><b>One query, six ways</b>
+        <p>The same aggregation in RDD, DataFrame, SQL, Scala Dataset, pandas and the pandas API on Spark, with what Spark can and can't optimise in each, plus every conversion between them.</p>
+      </a>
+      <a class="mod" href="production.html">
+        <span class="n">Production issues</span><b>Crossing between Spark and pandas</b>
+        <p>toPandas OOM, silent Arrow fallback, slow Python UDFs, losing optimisation through RDDs, pandas-on-Spark surprises, and RDD code failing on Spark Connect.</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../architecture/index.html"><span>Previous · Module 1</span><b>Architecture &amp; memory</b></a>
+    <a href="../../spark-execution.html"><span>Next · Module 3</span><b>Execution flow &amp; lazy evaluation</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const KEY="de-learning-done-v1",items=[[25,"RDD vs DataFrame vs Dataset vs pandas DataFrame"],[26,"toPandas, Arrow and the pandas API on Spark"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

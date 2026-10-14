@@ -161,6 +161,7 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var
 /* lazy-eval stepper */
 .stepper{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:1rem;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1rem;margin:1rem 0}
 @media (max-width:720px){.stepper{grid-template-columns:1fr}}
+.stepper > div{min-width:0}
 .codelines{font:.82rem/1.5 var(--mono);display:flex;flex-direction:column;gap:.2rem}
 .codelines div{padding:.35rem .55rem;border-radius:6px;border:1px solid transparent;color:var(--muted);overflow-x:auto;white-space:pre}
 .codelines div.done{color:var(--fg)}

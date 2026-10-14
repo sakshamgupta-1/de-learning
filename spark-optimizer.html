@@ -9,15 +9,17 @@
   <a class="brand" href="index.html"><i></i>DE Learning</a>
   <nav class="mods" aria-label="Spark Core modules">
     <a href="index.html">Hub</a>
+    <a href="spark/mapreduce/index.html">Background</a>
     <a href="spark/architecture/index.html">1 · Architecture</a>
-    <a href="spark-execution.html">2 · Execution</a>
-    <a href="spark-optimizer.html" aria-current="page">3 · Optimizer &amp; AQE</a>
-    <a href="spark-tuning.html">4 · Tuning &amp; debug</a>
+    <a href="spark/data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="spark-execution.html">3 · Execution</a>
+    <a href="spark-optimizer.html" aria-current="page">4 · Optimizer &amp; AQE</a>
+    <a href="spark-tuning.html">5 · Tuning &amp; debug</a>
   </nav>
 </div></header>
 
 <main class="page"><div class="wrap">
-  <p class="eyebrow">Spark Core · Module 3 of 4</p>
+  <p class="eyebrow">Spark Core · Module 4 of 5</p>
   <h1>How Spark decides how to run your query</h1>
   <p class="lede">Catalyst rewrites your plan before it runs; AQE rewrites it again while it runs. Knowing both lets you read <code>explain()</code> and predict what Spark will do.</p>
   <div class="toc">
@@ -220,8 +222,8 @@ spark.sql("SELECT /*+ BROADCAST(c) */ * FROM orders o JOIN customers c USING (cu
   </section>
 
   <nav class="next">
-    <a href="spark-execution.html"><span>Previous · Module 2</span><b>Execution flow &amp; lazy evaluation</b></a>
-    <a href="spark-tuning.html"><span>Next · Module 4</span><b>Performance tuning &amp; debugging</b></a>
+    <a href="spark-execution.html"><span>Previous · Module 3</span><b>Execution flow &amp; lazy evaluation</b></a>
+    <a href="spark-tuning.html"><span>Next · Module 5</span><b>Performance tuning &amp; debugging</b></a>
   </nav>
 </div></main>
 
