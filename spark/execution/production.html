@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Execution Pitfalls</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="index.html" aria-current="page">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Execution flow &amp; lazy evaluation</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 3 · Production issues</p>
+  <h1>When lazy execution bites</h1>
+  <p class="lede">Problems that come from how Spark plans and runs jobs, rather than from memory or data size. Each follows the same path: symptom, why, how to confirm, fix, prevention, interview answer.</p>
+  <div class="toc">
+    <a href="#recompute">Recomputed lineage</a><a href="#debug-actions">Leftover debug actions</a><a href="#huge-plans">Huge plans from loops</a><a href="#fetch-failed">Fetch failures</a><a href="#aborted">Job aborted after retries</a><a href="#late-errors">Errors far from the cause</a><a href="#interview">Interview questions</a>
+  </div>
+
+  <section id="recompute">
+    <h2>The same data is read and computed again and again</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A pipeline takes two or three times longer than its data size suggests. The Spark UI shows the same file scan in several jobs, each with the full input size.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>Every action re-runs its DataFrame's lineage from the source. A DataFrame used by three writes is computed three times.</li>
+        <li>Expensive steps (joins, wide aggregations, UDFs) upstream of several outputs are repeated each time.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>SQL / DataFrame tab: identical scan and join sub-plans in several queries.</li>
+        <li>Input size summed across jobs is a multiple of the table size.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Cache the shared DataFrame before the first action, and <code>unpersist()</code> after the last.</li>
+        <li>For long or heavy shared steps, write an intermediate table once and read it in later steps; this also makes reruns cheaper.</li>
+        <li>Combine outputs: one <code>partitionBy</code> write instead of a loop of filtered writes.</li>
+      </ul>
+<pre><code>enriched = orders.join(customers, "cust_id").filter("status = 'PAID'").cache()
+enriched.groupBy("segment").sum("amount").write.saveAsTable("gold.by_segment")
+enriched.groupBy("country").sum("amount").write.saveAsTable("gold.by_country")
+enriched.unpersist()</code></pre>
+      <h3>Prevent</h3>
+      <ul><li>When one DataFrame feeds several outputs, decide on purpose between recompute, cache and an intermediate table.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Spark is lazy per action, so every action recomputes its lineage. When one expensive DataFrame feeds several outputs I cache it, or write it once as an intermediate table, and I make sure to unpersist afterwards."</div>
+    </div>
+  </section>
+
+  <section id="debug-actions">
+    <h2>Debug actions left in production code</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>Extra jobs labelled <code>count</code>, <code>show</code> or <code>collect</code> appear before the real write, each doing a full pass over the data. Runtime is far above what the final write needs.</p>
+      <h3>Why it happens</h3>
+      <p><code>print(df.count())</code>, <code>df.show()</code> and similar lines added during development are real actions. Each one runs the whole lineage. Logging row counts at every step can double or triple a job's runtime.</p>
+      <h3>Fix</h3>
+      <ul>
+        <li>Remove them, or guard them behind a debug flag.</li>
+        <li>Get counts from the write itself where possible (Delta table history, the SQL tab's "rows output", or write metrics) instead of an extra pass.</li>
+        <li>If you need a count and the data, cache first so the count and the write share one computation.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Things like count and show are actions, so each one runs the full lineage. In production I remove debug actions or put them behind a flag, and take row counts from write metrics or table history instead."</div>
+    </div>
+  </section>
+
+  <section id="huge-plans">
+    <h2>Huge plans from loops</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>java.lang.StackOverflowError
+    at org.apache.spark.sql.catalyst.trees.TreeNode...</code></pre>
+      <p>Or the driver spends minutes "planning" before any task runs, with the Spark UI idle.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>Calling <code>withColumn</code> hundreds of times in a loop, or unioning DataFrames in a loop, builds a very deep plan. Each call also triggers re-analysis of the whole plan, so planning time grows quickly.</li>
+        <li>Iterative algorithms that reuse the previous iteration's DataFrame grow lineage every round.</li>
+      </ul>
+      <h3>Fix</h3>
+      <ul>
+        <li>Add many columns in one call: <code>select</code> with a list, or <code>withColumns</code> with a dict (Spark 3.3+).</li>
+        <li>Union a list at once with <code>functools.reduce</code> over a small number of inputs, or read them as one source.</li>
+        <li>In iterative jobs, cut lineage every few rounds with <code>checkpoint()</code>, <code>localCheckpoint()</code>, or by writing and re-reading.</li>
+      </ul>
+<pre><code><span class="muted"># before: 300 withColumn calls, 300 plan re-analyses</span>
+for c in cols:
+    df = df.withColumn(c, F.trim(F.col(c)))
+
+<span class="muted"># after: one projection</span>
+df = df.select(*[F.trim(F.col(c)).alias(c) if c in cols else F.col(c) for c in df.columns])</code></pre>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Building a DataFrame in a long loop, like hundreds of withColumn calls, creates a huge plan that's slow to analyse and can overflow the stack. I build the columns in a single select, and in iterative jobs I truncate lineage with checkpoints."</div>
+    </div>
+  </section>
+
+  <section id="fetch-failed">
+    <h2>Fetch failures and stage retries</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>org.apache.spark.shuffle.FetchFailedException: Failed to connect to host-12/10.0.4.12:7337
+Stage 7 (shuffle map stage) resubmitted due to fetch failure</code></pre>
+      <p>Stages show as retried; earlier stages run again; total runtime balloons.</p>
+      <h3>Why it happens</h3>
+      <p>A stage's tasks fetch shuffle files written by the previous stage's executors. If one of those executors died (OOM, spot reclaim, node failure, long GC), its shuffle files are gone. Spark must rerun the <b>parent</b> stage's tasks that produced them, using lineage, before continuing.</p>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Stages tab: retried stage attempts; failed tasks mention <code>FetchFailed</code>.</li>
+        <li>Executors tab: lost or removed executors around the same time, and why.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Fix why executors die: memory (see <a href="../architecture/production.html#triage">Module 1 failures</a>), GC, or preemption.</li>
+        <li>Keep shuffle files available after executor loss: external shuffle service, or graceful decommissioning with block migration on spot or Kubernetes.</li>
+        <li>Use more reliable nodes for shuffle-heavy jobs.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A FetchFailedException means shuffle output from an earlier stage is no longer reachable, usually because its executor died. Spark recomputes the missing parent tasks from lineage. I fix the executor loss itself, and use a shuffle service or decommissioning so shuffle files survive."</div>
+    </div>
+  </section>
+
+  <section id="aborted">
+    <h2>Job aborted after four task failures</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>Job aborted due to stage failure: Task 112 in stage 3.0 failed 4 times,
+most recent failure: ... java.lang.NumberFormatException: For input string: "N/A"</code></pre>
+      <h3>Why it happens</h3>
+      <p>A task is retried up to <code>spark.task.maxFailures</code> (4) times. If the cause is <b>deterministic</b> (a bad record, a parsing bug, a failing UDF), every retry hits the same row and fails, so the job aborts. Retries only help with <b>transient</b> causes such as a flaky node or network blip.</p>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Read the most recent failure's exception, not just "failed 4 times".</li>
+        <li>Same task index failing each attempt on different executors means it's the data, not the machine.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Find and handle the bad records: <code>try_cast</code> in SQL (Spark 3.2+) or casts that return NULL, explicit validation, or quarantine rows that fail rules.</li>
+        <li>For file sources, read in <code>PERMISSIVE</code> mode with a corrupt-record column (or <code>badRecordsPath</code> on Databricks) instead of failing the job.</li>
+        <li>Make UDFs defensive about NULLs and unexpected values.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Task retries help only with transient failures. If the same task fails four times on different executors it's deterministic, usually a bad record, so I read the root exception, find the row, and handle it with safe casts, permissive parsing or a quarantine table."</div>
+    </div>
+  </section>
+
+  <section id="late-errors">
+    <h2>Errors that surface far from their cause</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A failure is reported at the final <code>write</code> on line 300, but the cause is a cast, UDF or division written on line 40. The stack trace points into generated code, not your line.</p>
+      <h3>Why it happens</h3>
+      <p>Because execution is lazy, data-dependent errors only happen when an action actually processes rows, so they're reported at that action. Everything in the lineage runs inside the same stage, so the trace doesn't say which of your lines produced it. With Spark Connect, even analysis errors such as a wrong column name move to the action.</p>
+      <h3>Fix</h3>
+      <ul>
+        <li>Bisect: add a temporary action (<code>.limit(1000).collect()</code>) after suspected steps, in a notebook or test, to find where it breaks.</li>
+        <li>Unit-test transformation functions on small DataFrames so data errors show up near their cause.</li>
+        <li>With ANSI mode (<code>spark.sql.ansi.enabled</code>, on by default since Spark 4.0), invalid casts and overflows raise errors that name the expression instead of silently producing NULLs.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Lazy execution means data errors appear at the action, not where they're written. I keep transformations in small, unit-tested functions, and when debugging I bisect with temporary limited actions until I find the failing step."</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2>Common interview questions</h2>
+    <div class="qa">
+      <details><summary>Explain the Spark execution flow from spark-submit to job completion.</summary><div>The driver starts, creates the SparkSession and gets executors from the cluster manager. Transformations build a logical plan. An action creates a job; Catalyst optimises the plan; the DAG scheduler cuts it into stages at shuffles; the task scheduler sends one task per partition to executor cores; stages run in dependency order, with shuffle files passed between them; results return to the driver, and failed tasks are retried using lineage.</div></details>
+      <details><summary>How are jobs, stages and tasks created?</summary><div>Each action creates a job. The DAG scheduler walks back from the result and creates a new stage at each shuffle dependency. Each stage has one task per partition of its data.</div></details>
+      <details><summary>What's lazy evaluation and why does Spark use it?</summary><div>Transformations only record a plan; work happens when an action needs a result. That lets Catalyst optimise the whole chain, fuse narrow steps into one pass, and recover lost partitions from lineage. It's per action, so each action recomputes its lineage unless cached.</div></details>
+      <details><summary>What are narrow and wide transformations, and how do they relate to stages?</summary><div>Narrow transformations build each output partition from one input partition (filter, select, map), so they're pipelined within a stage. Wide ones need data from many partitions (groupBy, distinct, most joins), so they shuffle, and each shuffle is a stage boundary.</div></details>
+      <details><summary>Why are RDDs immutable?</summary><div>So lineage-based recovery is safe (a recomputed partition equals the original) and parallel tasks need no locking. Every transformation returns a new RDD or DataFrame.</div></details>
+      <details><summary>Your job runs much longer than expected and the UI shows the same scan in several jobs. Why?</summary><div>Several actions are re-running the same lineage. Cache the shared DataFrame, write an intermediate table, or remove debug actions.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../../spark-optimizer.html"><span>Next · Module 4</span><b>Catalyst, joins &amp; AQE</b></a>
+  </nav>
+</div></main>
+</body></html>

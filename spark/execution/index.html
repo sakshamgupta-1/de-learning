@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Execution Flow</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="index.html" aria-current="page">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">Execution flow &amp; lazy evaluation</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 3 of 5 · Overview</p>
+  <h1>From your code to running tasks</h1>
+  <p class="lede">How Spark turns Python into work on the cluster: transformations build a plan, actions run it, shuffles cut it into stages, and partitions become tasks. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#submit">The flow</a><a href="#lazy">Lazy evaluation</a><a href="#narrow-wide">Narrow vs wide</a><a href="#jobs">Jobs, stages, tasks</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="submit">
+    <h2>The flow in five steps</h2>
+    <ol class="rail">
+      <li><div><b>Start.</b> <code>spark-submit</code> (or a notebook) starts the driver, which gets executors from the cluster manager.</div></li>
+      <li><div><b>Describe.</b> Your code runs on the driver. Each transformation only adds a step to a <b>logical plan</b>; no data moves.</div></li>
+      <li><div><b>Trigger.</b> An <b>action</b> (<code>write</code>, <code>count</code>, <code>collect</code>, <code>show</code>) creates a <b>job</b>.</div></li>
+      <li><div><b>Plan.</b> Catalyst optimises the plan; the DAG scheduler cuts it into <b>stages</b> at every shuffle.</div></li>
+      <li><div><b>Run.</b> Each stage runs <b>one task per partition</b> on executor cores; stages run in dependency order until the job ends.</div></li>
+    </ol>
+    <p class="small muted">All ten steps, including retries and data locality: <a href="deep-dive.html#submit">Deep dive →</a></p>
+  </section>
+
+  <section id="lazy">
+    <h2>Lazy evaluation: per action, not per script</h2>
+    <p>Transformations don't run anything; they extend a DataFrame's plan (its <b>lineage</b>). Your Python still runs line by line. When the interpreter <b>reaches an action</b>, that line blocks: Spark optimises <i>that DataFrame's lineage so far</i>, runs it as a job, and returns. Spark never reads ahead in your script.</p>
+<pre><code>orders = spark.read.parquet("s3://lake/orders")    <span class="muted"># metadata only</span>
+ae     = orders.filter("country = 'AE'")           <span class="muted"># plan grows, instant</span>
+n      = ae.count()                                <span class="muted"># <span class="k">Job 1 runs now</span>; Python waits</span>
+if n &gt; 0:                                          <span class="muted"># plain Python</span>
+    ae.groupBy("segment").sum("amount") \
+      .write.saveAsTable("gold.sales")             <span class="muted"># <span class="k">Job 2</span>: re-reads orders from scratch</span></code></pre>
+    <p>Because it's lazy, Spark can optimise a whole chain at once (push filters into the scan, fuse narrow steps). Because it's per action, <b>every action recomputes its lineage</b> unless you cache. <a href="deep-dive.html#per-action">Timeline and the exceptions →</a></p>
+  </section>
+
+  <section id="narrow-wide">
+    <h2>Narrow vs wide transformations</h2>
+    <p>A <b>narrow</b> transformation builds each output partition from one input partition, so no data moves between machines. A <b>wide</b> one needs rows from many partitions, so Spark <b>shuffles</b> data across the network, and that's where a new stage starts.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Narrow (no shuffle)</th><th>Wide (shuffle)</th><th>It depends</th></tr></thead>
+      <tbody><tr>
+        <td><code>select</code>, <code>filter</code>, <code>withColumn</code>, <code>map</code>, <code>flatMap</code>, <code>union</code>, <code>coalesce</code>, <code>explode</code></td>
+        <td><code>groupBy</code>/<code>agg</code>, <code>distinct</code>, <code>dropDuplicates</code>, <code>orderBy</code>, <code>repartition</code>, sort-merge <code>join</code>, window <code>partitionBy</code></td>
+        <td><code>join</code> is narrow for the big side when the other side is <b>broadcast</b>, or both sides are already partitioned the same way</td>
+      </tr></tbody></table></div>
+  </section>
+
+  <section id="jobs">
+    <h2>Jobs, stages and tasks</h2>
+    <p><b>One action → one job.</b> The DAG scheduler walks the plan back from the result and starts a <b>new stage at every shuffle</b> (shown as <code>Exchange</code> in plans). Each stage runs <b>one task per partition</b>. Here's one job that filters <code>orders</code>, joins <code>customers</code>, sums by segment and writes the result:</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 300" role="img" aria-labelledby="stT">
+  <title id="stT">The example write job split into four stages separated by shuffles</title>
+  <defs><marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect class="bxb" x="20" y="30" width="230" height="104" rx="8"/>
+  <text class="tb" x="36" y="56">Stage 0 · orders</text><text class="ts" x="36" y="78">Scan parquet → Filter AE → Project</text><text class="ts" x="36" y="96">shuffle write, hashed by cust_id</text><text class="tm" x="36" y="120">e.g. 120 tasks (file splits)</text>
+  <rect class="bxb" x="20" y="168" width="230" height="104" rx="8"/>
+  <text class="tb" x="36" y="194">Stage 1 · customers</text><text class="ts" x="36" y="216">Scan → Project</text><text class="ts" x="36" y="234">shuffle write, hashed by cust_id</text><text class="tm" x="36" y="258">e.g. 40 tasks</text>
+  <rect class="bxa" x="340" y="98" width="240" height="104" rx="8"/>
+  <text class="tb" x="356" y="124">Stage 2 · join</text><text class="ts" x="356" y="146">Sort-merge join → partial sum</text><text class="ts" x="356" y="164">shuffle write, hashed by segment</text><text class="tm" x="356" y="188">200 tasks (shuffle.partitions)</text>
+  <rect class="bxo" x="670" y="98" width="210" height="104" rx="8"/>
+  <text class="tb" x="686" y="124">Stage 3 · result</text><text class="ts" x="686" y="146">Final sum → write table</text><text class="ts" x="686" y="164">AQE may coalesce to a</text><text class="tm" x="686" y="188">few tasks</text>
+  <path class="lna" d="M250,82 C300,82 300,136 336,140" marker-end="url(#c1)"/>
+  <path class="lna" d="M250,220 C300,220 300,166 336,162" marker-end="url(#c1)"/>
+  <line class="lna" x1="580" y1="150" x2="666" y2="150" marker-end="url(#c1)"/>
+  <text class="ts" x="294" y="76" text-anchor="middle">Exchange</text>
+  <text class="ts" x="294" y="236" text-anchor="middle">Exchange</text>
+  <text class="ts" x="623" y="140" text-anchor="middle">Exchange</text>
+</svg>
+<p class="cap">One action → one job → four stages. If <code>customers</code> is under the broadcast threshold (10 MB by default), Stage 1 becomes a broadcast, the orders side is not shuffled, and Stages 0 and 2 merge into one.</p>
+</div></div>
+
+<div class="wrap">
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Fact</th><th>Rule or default</th></tr></thead>
+      <tbody>
+        <tr><td>Job</td><td>One per action (plus small extra jobs for schema inference, file listing or broadcasts)</td></tr>
+        <tr><td>Stage boundary</td><td>Every shuffle (<code>Exchange</code>); narrow steps either side are pipelined into one stage</td></tr>
+        <tr><td>Tasks per stage</td><td>= partitions in that stage</td></tr>
+        <tr><td>Scan partitions</td><td>About one per 128 MB of input (<code>spark.sql.files.maxPartitionBytes</code>)</td></tr>
+        <tr><td>Post-shuffle partitions</td><td><code>spark.sql.shuffle.partitions</code> = 200, unless AQE coalesces them</td></tr>
+        <tr><td>Task retries</td><td><code>spark.task.maxFailures</code> = 4, then the job fails</td></tr>
+        <tr><td>Lost shuffle output</td><td>The parent stage's missing tasks are recomputed from lineage</td></tr>
+        <tr><td>Recomputation</td><td>Every action re-runs its lineage from the source unless cached</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Lazy evaluation</div>"Python executes line by line on the driver. Transformations only extend a DataFrame's logical plan; when the interpreter reaches an action, Spark optimises that lineage, runs it as one or more jobs and blocks until it returns. It never looks ahead, so each action recomputes its lineage unless it's cached."</div>
+    <div class="callout say"><div class="lbl">Jobs, stages, tasks</div>"An action creates a job. The DAG scheduler starts a new stage at every shuffle dependency, so stages are runs of narrow transformations pipelined together. Each stage runs one task per partition, so partitions decide parallelism."</div>
+    <div class="callout say"><div class="lbl">Narrow vs wide</div>"Narrow transformations like filter and select work within a partition and are pipelined in one stage. Wide ones like groupBy, distinct and most joins need rows from many partitions, so they shuffle data over the network and create a stage boundary. A broadcast join avoids shuffling the large side."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>How many jobs: <code>df = spark.read.parquet(p); df.count(); df.filter(...).write.parquet(q)</code>?</summary><div>At least two, one per action. The read may add a small listing job. Both actions read the files, unless <code>df</code> is cached.</div></details>
+      <details><summary>Where exactly is a stage boundary created?</summary><div>At every wide (shuffle) dependency, an <code>Exchange</code> in the physical plan. Narrow operations either side are pipelined into the same stage.</div></details>
+      <details><summary>Is <code>coalesce</code> narrow or wide?</summary><div>Narrow: it merges existing partitions without a shuffle. <code>repartition</code> is wide.</div></details>
+      <details><summary>Does Spark run your whole script lazily as one plan?</summary><div>No. Laziness is per DataFrame. Python runs normally, and each action runs immediately, blocking until its job finishes.</div></details>
+      <details><summary>What happens when a task fails?</summary><div>It's retried, up to 4 attempts by default. If shuffle files from an earlier stage were lost with an executor, the missing parent tasks are recomputed from lineage first.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html">
+        <span class="n">Deep dive</span><b>How plans become stages</b>
+        <p>All ten submit steps, a Python-vs-cluster timeline, calls that run jobs eagerly, lineage and immutability, how stages are cut, skipped stages, reduceByKey vs groupByKey.</p>
+      </a>
+      <a class="mod" href="examples.html">
+        <span class="n">Examples</span><b>Step through it, count the jobs</b>
+        <p>An interactive lazy-evaluation stepper, plus six code snippets to work out jobs and stages yourself.</p>
+      </a>
+      <a class="mod" href="production.html">
+        <span class="n">Production issues</span><b>When execution bites</b>
+        <p>Recomputed lineage, leftover debug actions, huge plans from loops, fetch failures, aborted jobs, and errors that surface far from their cause.</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../data-abstractions/index.html"><span>Previous · Module 2</span><b>RDD, DataFrame, Dataset &amp; pandas</b></a>
+    <a href="../../spark-optimizer.html"><span>Next · Module 4</span><b>Catalyst, joins &amp; AQE</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const KEY="de-learning-done-v1",items=[[3,"Spark execution flow from spark-submit to job completion"],[4,"Lazy evaluation, lineage and RDD immutability"],[5,"Narrow vs wide transformations and stage boundaries"],[6,"How jobs, stages and tasks are created"],[7,"reduceByKey vs groupByKey"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

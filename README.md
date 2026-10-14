@@ -21,7 +21,8 @@ The hub started as a personal prep tool and is now open to friends for review an
 | `spark/mapreduce/` | Spark Core background: Hadoop & MapReduce, and what Spark solved |
 | `spark/data-abstractions/` | Spark Core module 2: RDD vs DataFrame vs Dataset vs pandas, with examples and production issues |
 | `spark-architecture.html` | Redirect to `spark/architecture/` |
-| `spark-execution.html` | Spark Core module 3: spark-submit flow, lazy evaluation, narrow vs wide, stages |
+| `spark/execution/` | Spark Core module 3: overview, deep dive, examples (stepper, job counting) and production issues |
+| `spark-execution.html` | Redirect to `spark/execution/` |
 | `spark-optimizer.html` | Spark Core module 4: Catalyst, pushdown and pruning, explain(), joins, AQE, UDFs |
 | `spark-tuning.html` | Spark Core module 5: debug flow, six failure scenarios, shuffle, partition and executor sizing |
 | `styles.css` | Shared design tokens and components (light and dark themes) |
