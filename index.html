@@ -13,7 +13,7 @@
     <a href="spark/mapreduce/index.html">Background</a>
     <a href="spark/architecture/index.html">1 · Architecture</a>
     <a href="spark/data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
-    <a href="spark-execution.html">3 · Execution</a>
+    <a href="spark/execution/index.html">3 · Execution</a>
     <a href="spark-optimizer.html">4 · Optimizer &amp; AQE</a>
     <a href="spark-tuning.html">5 · Tuning &amp; debug</a>
   </nav>
@@ -50,7 +50,7 @@
           <p>Where each runs, why DataFrames win, Spark vs pandas, toPandas and Arrow.</p>
           <div class="ft"><span>≈45 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
-        <a class="mod" href="spark-execution.html" data-mod="exec">
+        <a class="mod" href="spark/execution/index.html" data-mod="exec">
           <span class="n">Module 3</span><b>Execution flow &amp; lazy evaluation</b>
           <p>spark-submit to completion, plan building, narrow vs wide, jobs → stages → tasks.</p>
           <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
@@ -87,7 +87,7 @@
 </main>
 
 <script>
-const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark-execution.html",O="spark-optimizer.html",T="spark-tuning.html";
+const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark-optimizer.html",T="spark-tuning.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
@@ -97,7 +97,7 @@ const GROUPS=[
   ["Lazy evaluation, lineage and RDD immutability",E+"#lazy","exec"],
   ["Narrow vs wide transformations and stage boundaries",E+"#narrow-wide","exec"],
   ["How jobs, stages and tasks are created",E+"#jobs","exec"],
-  ["reduceByKey vs groupByKey",E+"#rbk","exec"],
+  ["reduceByKey vs groupByKey",X+"#rbk","exec"],
   ["Catalyst optimizer and Tungsten",O+"#catalyst","opt"],
   ["Predicate pushdown in Spark SQL",O+"#pushdown","opt",1],
   ["Partition pruning vs dynamic partition pruning",O+"#pushdown","opt"],

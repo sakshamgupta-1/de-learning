@@ -12,7 +12,7 @@
     <a href="../mapreduce/index.html">Background</a>
     <a href="index.html" aria-current="page">1 · Architecture</a>
     <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
-    <a href="../../spark-execution.html">3 · Execution</a>
+    <a href="../execution/index.html">3 · Execution</a>
     <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
     <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
   </nav>
@@ -110,7 +110,7 @@
 └─ Job        one per action (count, write, collect)    ← created by the driver
    └─ Stage   a new one at every shuffle                ← cut by the DAG scheduler
       └─ Task one per partition, one core each          ← run by executors</code></pre>
-    <p class="small muted">Module 2 walks a real pipeline through this: <a href="../../spark-execution.html#jobs">Jobs, stages and tasks for our pipeline →</a></p>
+    <p class="small muted">Module 3 walks a real pipeline through this: <a href="../execution/index.html#jobs">Jobs, stages and tasks →</a></p>
   </section>
 
   <section id="memory">

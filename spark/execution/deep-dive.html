@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Execution Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="index.html" aria-current="page">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Execution flow &amp; lazy evaluation</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 3 · Deep dive</p>
+  <h1>How plans become stages and tasks</h1>
+  <p class="lede">The full submit sequence, what your Python and the cluster are each doing over time, the calls that break the "lazy" rule, and how the scheduler cuts a plan into stages. Start with the <a href="index.html">overview</a> for the basics.</p>
+  <div class="toc">
+    <a href="#submit">Ten steps</a><a href="#per-action">Python vs cluster timeline</a><a href="#eager">Not quite lazy</a><a href="#lineage">Lineage &amp; immutability</a><a href="#narrow-wide">Partitions, narrow &amp; wide</a><a href="#stages">How stages are cut</a><a href="#rbk">reduceByKey vs groupByKey</a><a href="#declarative">Compared with Lakeflow</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="submit">
+    <h2>spark-submit to job completion, in ten steps</h2>
+    <ol class="rail">
+      <li><div><b>Submit.</b> <code>spark-submit</code> (or a Databricks job or notebook) starts the driver with your code and configuration.</div></li>
+      <li><div><b>Driver starts.</b> It creates the SparkSession and asks the cluster manager for executors.</div></li>
+      <li><div><b>Executors launch and register</b> with the driver.</div></li>
+      <li><div><b>Your code runs on the driver.</b> Each transformation adds a step to a logical plan. No data moves.</div></li>
+      <li><div><b>An action is called.</b> Spark creates a <b>job</b> for that DataFrame's lineage.</div></li>
+      <li><div><b>Catalyst optimises</b> the logical plan and picks a physical plan (Module 4).</div></li>
+      <li><div><b>The DAG scheduler</b> cuts the physical plan into <b>stages</b> at every shuffle and submits them in dependency order.</div></li>
+      <li><div><b>The task scheduler</b> sends one <b>task per partition</b> to free executor cores, preferring executors that already hold the data (locality).</div></li>
+      <li><div><b>Executors run tasks.</b> A stage that ends in a shuffle writes shuffle files to local disk; the next stage fetches them over the network.</div></li>
+      <li><div><b>The job finishes</b> when its last stage completes, and the result returns to Python. Failed tasks are retried (4 attempts by default) using lineage. The application ends when the SparkSession stops.</div></li>
+    </ol>
+  </section>
+
+  <section id="per-action">
+    <h2>What Python and the cluster are doing over time</h2>
+    <p>The same code as the overview, drawn as two lanes. Python is busy for microseconds per transformation, then <b>blocks</b> at each action while the cluster runs a job.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 250" role="img" aria-labelledby="tlT">
+  <title id="tlT">Python lane runs transformations instantly and blocks at count and write; cluster lane runs Job 1 and Job 2 during those blocks</title>
+  <text class="tb" x="20" y="74">Python</text><text class="ts" x="20" y="92">(driver)</text>
+  <text class="tb" x="20" y="164">Cluster</text><text class="ts" x="20" y="182">(executors)</text>
+  <line class="ln" x1="130" y1="80" x2="880" y2="80" style="opacity:.35"/>
+  <line class="ln" x1="130" y1="170" x2="880" y2="170" style="opacity:.35"/>
+
+  <circle class="dot" cx="160" cy="80" r="5"/><text class="tm" x="160" y="58" text-anchor="middle">read</text>
+  <circle class="dot" cx="214" cy="80" r="5"/><text class="tm" x="214" y="58" text-anchor="middle">filter</text>
+  <rect class="bxr dash" x="260" y="68" width="210" height="24" rx="4"/>
+  <text class="tm" x="365" y="58" text-anchor="middle">count() · waiting</text>
+  <rect class="bxa" x="260" y="156" width="210" height="28" rx="4"/>
+  <text class="tb" x="365" y="175" text-anchor="middle">Job 1</text>
+  <text class="ts" x="365" y="204" text-anchor="middle">scan → filter → count</text>
+
+  <circle class="dot" cx="498" cy="80" r="5"/><text class="tm" x="498" y="58" text-anchor="middle">if n &gt; 0</text>
+  <circle class="dot" cx="578" cy="80" r="5"/><text class="tm" x="578" y="42" text-anchor="middle">groupBy</text>
+  <rect class="bxr dash" x="612" y="68" width="262" height="24" rx="4"/>
+  <text class="tm" x="743" y="58" text-anchor="middle">write · waiting</text>
+  <rect class="bxa" x="612" y="156" width="262" height="28" rx="4"/>
+  <text class="tb" x="743" y="175" text-anchor="middle">Job 2</text>
+  <text class="ts" x="743" y="204" text-anchor="middle">scan again → filter → aggregate → write</text>
+
+  <line class="ln dash" x1="260" y1="96" x2="260" y2="152"/>
+  <line class="ln dash" x1="470" y1="96" x2="470" y2="152"/>
+  <line class="ln dash" x1="612" y1="96" x2="612" y2="152"/>
+  <line class="ln dash" x1="874" y1="96" x2="874" y2="152"/>
+  <text class="ts" x="508" y="232" text-anchor="middle">time →   transformations take microseconds; each action blocks Python until its job finishes</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="tbl"><table>
+    <thead><tr><th>Line</th><th>Python</th><th>Spark</th></tr></thead>
+    <tbody>
+      <tr><td><code>read</code></td><td>Runs</td><td>Lists files and reads the schema (may be a tiny job)</td></tr>
+      <tr><td><code>filter</code></td><td>Runs instantly</td><td>The logical plan grows by one node</td></tr>
+      <tr><td><code>count()</code></td><td><b>Blocks</b></td><td>Optimises <i>read → filter</i>, runs <b>Job 1</b>, returns a number</td></tr>
+      <tr><td><code>if n &gt; 0</code></td><td>Plain Python</td><td>Not involved</td></tr>
+      <tr><td><code>groupBy</code></td><td>Runs instantly</td><td>A new plan built on top of <code>ae</code>'s lineage</td></tr>
+      <tr><td><code>write</code></td><td><b>Blocks</b></td><td>Runs <b>Job 2</b>, which re-reads and re-filters <code>orders</code></td></tr>
+    </tbody></table></div>
+  <ul>
+    <li><b>Why Spark can't look ahead:</b> code after an action can depend on its result (<code>if n &gt; 0</code>). Spark can't plan what it doesn't know will run.</li>
+    <li><b>Each action re-runs its lineage.</b> Here <code>orders</code> is read twice. Cache <code>ae</code> before the first action, or drop the extra <code>count()</code>.</li>
+    <li><b>Actions run one after another.</b> Two independent writes are two sequential jobs, unless you start them from separate threads.</li>
+  </ul>
+
+  <section id="eager">
+    <h2>Not quite lazy: calls that run work immediately</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Call</th><th>What runs eagerly</th></tr></thead>
+      <tbody>
+        <tr><td><code>spark.read…</code> with <code>inferSchema=true</code> (CSV, JSON)</td><td>A job that scans data to work out column types. Give a schema to avoid it.</td></tr>
+        <tr><td><code>spark.read.parquet(…)</code> on many files</td><td>File listing and footer reads to build the schema</td></tr>
+        <tr><td>DataFrame transformations in classic PySpark</td><td><b>Analysis</b>: a misspelt column raises <code>AnalysisException</code> on that line, before any action</td></tr>
+        <tr><td><code>df.checkpoint()</code></td><td>Runs a job to materialise the data (eager by default)</td></tr>
+        <tr><td>RDD <code>sortByKey</code></td><td>A sampling job to decide range-partition boundaries</td></tr>
+        <tr><td><code>spark.sql("CREATE TABLE …")</code>, <code>INSERT</code>, DDL</td><td>Commands execute when called</td></tr>
+        <tr><td><code>df.cache()</code></td><td>Nothing: caching is lazy, and data is cached during the next action</td></tr>
+        <tr><td><code>df.explain()</code></td><td>Planning only; no job runs</td></tr>
+      </tbody></table></div>
+    <div class="callout trap"><div class="lbl">Spark Connect moves errors to the action</div>With Spark Connect (Spark 3.4+, Databricks serverless and shared compute), the client sends unresolved plans and the <b>server</b> analyses them. A misspelt column may only fail at the action, not on the line where you made the mistake.</div>
+  </section>
+
+  <section id="lineage">
+    <h2>Why lazy, and why immutable</h2>
+    <ul>
+      <li><b>Whole-plan optimisation.</b> Seeing the full chain lets Catalyst push filters into the file scan and read only the needed columns.</li>
+      <li><b>Fewer passes.</b> Consecutive narrow steps are fused into one stage, so each row is read once and flows through all of them.</li>
+      <li><b>Fault tolerance through lineage.</b> The plan is a recipe. If an executor dies, Spark recomputes only the lost partitions from that recipe; no data replication needed.</li>
+    </ul>
+    <p>An RDD, and the DataFrame built on it, is an <b>immutable</b>, partitioned dataset plus the lineage that produced it. Every transformation returns a <i>new</i> dataset. Immutability is what makes recomputation safe (a rebuilt partition equals the original) and lets tasks run in parallel without locks.</p>
+  </section>
+
+  <section id="narrow-wide">
+    <h2>Partitions, narrow and wide</h2>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 290" role="img" aria-labelledby="nwT">
+  <title id="nwT">Narrow transformation maps partitions one to one; wide transformation shuffles all to all across a stage boundary</title>
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="ahb" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <text class="th" x="20" y="28">Narrow · filter, select, withColumn, map</text>
+  <text class="ts" x="20" y="48">same stage, no network, can be pipelined</text>
+  <g>
+    <rect class="bx" x="30" y="70" width="96" height="44" rx="6"/><text class="tm" x="78" y="97" text-anchor="middle">P0</text>
+    <rect class="bx" x="30" y="140" width="96" height="44" rx="6"/><text class="tm" x="78" y="167" text-anchor="middle">P1</text>
+    <rect class="bx" x="30" y="210" width="96" height="44" rx="6"/><text class="tm" x="78" y="237" text-anchor="middle">P2</text>
+    <rect class="bxb" x="270" y="70" width="96" height="44" rx="6"/><text class="tm" x="318" y="97" text-anchor="middle">P0'</text>
+    <rect class="bxb" x="270" y="140" width="96" height="44" rx="6"/><text class="tm" x="318" y="167" text-anchor="middle">P1'</text>
+    <rect class="bxb" x="270" y="210" width="96" height="44" rx="6"/><text class="tm" x="318" y="237" text-anchor="middle">P2'</text>
+    <line class="lnb" x1="126" y1="92" x2="266" y2="92" marker-end="url(#b1)"/>
+    <line class="lnb" x1="126" y1="162" x2="266" y2="162" marker-end="url(#b1)"/>
+    <line class="lnb" x1="126" y1="232" x2="266" y2="232" marker-end="url(#b1)"/>
+  </g>
+  <text class="th" x="450" y="28">Wide · groupBy, join, distinct, orderBy</text>
+  <text class="ts" x="450" y="48">shuffle: every input can send rows to every output</text>
+  <g>
+    <rect class="bx" x="460" y="70" width="96" height="44" rx="6"/><text class="tm" x="508" y="97" text-anchor="middle">P0</text>
+    <rect class="bx" x="460" y="140" width="96" height="44" rx="6"/><text class="tm" x="508" y="167" text-anchor="middle">P1</text>
+    <rect class="bx" x="460" y="210" width="96" height="44" rx="6"/><text class="tm" x="508" y="237" text-anchor="middle">P2</text>
+    <rect class="bxa" x="740" y="70" width="96" height="44" rx="6"/><text class="tm" x="788" y="97" text-anchor="middle">key A–H</text>
+    <rect class="bxa" x="740" y="140" width="96" height="44" rx="6"/><text class="tm" x="788" y="167" text-anchor="middle">key I–P</text>
+    <rect class="bxa" x="740" y="210" width="96" height="44" rx="6"/><text class="tm" x="788" y="237" text-anchor="middle">key Q–Z</text>
+    <g class="lna" marker-end="url(#b2)">
+      <line class="lna" x1="556" y1="92" x2="736" y2="92" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="92" x2="736" y2="160" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="92" x2="736" y2="228" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="162" x2="736" y2="96" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="162" x2="736" y2="162" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="162" x2="736" y2="228" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="232" x2="736" y2="96" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="232" x2="736" y2="164" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="232" x2="736" y2="232" marker-end="url(#b2)"/>
+    </g>
+    <line class="ln dash" x1="648" y1="62" x2="648" y2="262"/>
+    <text class="ts" x="648" y="282" text-anchor="middle">shuffle = stage boundary</text>
+  </g>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <h3>map vs flatMap</h3>
+<pre><code>rdd = sc.parallelize(["spark is fast", "delta lake"])
+rdd.map(lambda s: s.split(" ")).collect()
+<span class="muted"># [['spark','is','fast'], ['delta','lake']]   one output per input</span>
+rdd.flatMap(lambda s: s.split(" ")).collect()
+<span class="muted"># ['spark','is','fast','delta','lake']         zero or more outputs, flattened</span></code></pre>
+  <p class="small muted">The DataFrame equivalent of flatMap is <code>F.explode(F.split("text", " "))</code>. Both are narrow.</p>
+
+  <section id="stages">
+    <h2>How the scheduler cuts stages</h2>
+    <ol class="rail">
+      <li><div>The DAG scheduler starts from the operation that produces the action's result and <b>walks backwards</b> through the plan's dependencies.</div></li>
+      <li><div>Narrow dependencies are kept in the current stage. Each <b>shuffle dependency</b> ends the walk for that branch and creates a <b>parent stage</b> that must write its shuffle output first.</div></li>
+      <li><div>The final stage is a <b>ResultStage</b> (it computes the action's result). Every stage that feeds a shuffle is a <b>ShuffleMapStage</b>.</div></li>
+      <li><div>Stages are submitted parent-first. Parents that don't depend on each other, such as the two scans before a join, can <b>run at the same time</b>.</div></li>
+    </ol>
+    <h3>How many tasks</h3>
+    <div class="tbl"><table>
+      <thead><tr><th>Stage type</th><th>Tasks</th></tr></thead>
+      <tbody>
+        <tr><td>Reading files</td><td>About one per <code>spark.sql.files.maxPartitionBytes</code> (128 MB) of input; small files are packed together</td></tr>
+        <tr><td>After a shuffle</td><td><code>spark.sql.shuffle.partitions</code> (200), or fewer if AQE coalesces</td></tr>
+        <tr><td>After <code>repartition(n)</code> / <code>coalesce(n)</code></td><td><code>n</code></td></tr>
+        <tr><td>RDD from <code>parallelize</code></td><td><code>spark.default.parallelism</code> (usually total cores)</td></tr>
+      </tbody></table></div>
+    <h3>Skipped stages</h3>
+    <p>In the Spark UI, a stage marked <b>skipped</b> was needed by this job, but its shuffle output already existed from an earlier job, so Spark reused it. That's normal and good: it's Spark avoiding recomputation, for example when two actions share the same aggregation.</p>
+    <div class="callout trap"><div class="lbl">With AQE, one action shows several jobs</div>Adaptive Query Execution runs a query in pieces called query stages, re-planning between them. In the Jobs tab, one <code>write</code> can appear as several jobs. Read them together in the SQL / DataFrame tab, which shows the whole query.</div>
+  </section>
+
+  <section id="rbk">
+    <h2>reduceByKey vs groupByKey</h2>
+    <p>Both group by key and both shuffle. The difference is how much they shuffle.</p>
+    <div class="ba">
+      <div><h4>groupByKey</h4>
+        <p class="small">Ships <b>every</b> (key, value) pair across the network, then builds the full list of values per key in memory on the reducer side.</p>
+        <p class="small" style="font-family:var(--mono)">map side: (a,1) (a,1) (a,1) (b,1)<br>shuffled: 4 records</p>
+        <p class="small" style="color:var(--bad)">A hot key's whole value list must fit in one task's memory: OOM risk.</p></div>
+      <div><h4>reduceByKey</h4>
+        <p class="small">Combines values <b>on the map side first</b> (like a Hadoop Combiner), then shuffles one partial result per key per partition.</p>
+        <p class="small" style="font-family:var(--mono)">map side: (a,3) (b,1)<br>shuffled: 2 records</p>
+        <p class="small" style="color:var(--ok)">Less network, less memory. Use it, or <code>aggregateByKey</code>, whenever the function is associative.</p></div>
+    </div>
+    <p class="small muted">DataFrames do this automatically: <code>groupBy().agg(sum(…))</code> plans a <code>partial_sum</code> before the shuffle and a final sum after. You can see both in <code>explain()</code>. Background: <a href="../mapreduce/index.html#terms">the MapReduce Combiner</a>.</p>
+  </section>
+
+  <section id="declarative">
+    <h2>Compared with Lakeflow Declarative Pipelines</h2>
+    <p>Plain PySpark is lazy <i>per action</i>. Lakeflow Declarative Pipelines (formerly Delta Live Tables) work the opposite way: your Python is evaluated <b>once, up front, only to build a graph</b>. Each table function returns a DataFrame definition but runs nothing. The pipeline engine then sees every table and dependency together, orders them, and runs the whole graph with retries, incremental processing and data-quality checks. That's why calling <code>count()</code> or <code>collect()</code> inside a pipeline table function is an anti-pattern.</p>
+    <p class="small muted">A full comparison page will come with the Delta Lake &amp; Databricks path.</p>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>What's the difference between a ShuffleMapStage and a ResultStage?</summary><div>A ShuffleMapStage produces shuffle output for a later stage. A ResultStage is the final stage of a job and computes the action's result (rows for <code>collect</code>, a number for <code>count</code>, files for <code>write</code>).</div></details>
+      <details><summary>The Spark UI shows a job with 3 stages, 1 of them "skipped". Is something wrong?</summary><div>No. The skipped stage's shuffle output already existed from an earlier job, so Spark reused it instead of recomputing.</div></details>
+      <details><summary>A misspelt column fails only when you call <code>write</code>, not on the line with the typo. Why?</summary><div>You're likely on Spark Connect (or Databricks serverless/shared compute), where plans are analysed on the server at execution time. In classic PySpark the error would appear on the transformation line.</div></details>
+      <details><summary>Why can two stages run at the same time?</summary><div>If neither depends on the other, for example the scans of the two sides of a join, the scheduler submits both once their own parents are complete.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Execution overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+</body></html>

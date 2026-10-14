@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Execution Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="index.html" aria-current="page">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Execution flow &amp; lazy evaluation</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 3 · Examples</p>
+  <h1>Step through it, then count the jobs</h1>
+  <p class="lede">Watch a plan grow line by line until an action fires, then practise the skill interviewers test most: looking at code and saying how many jobs and stages it creates.</p>
+  <div class="toc"><a href="#stepper">Lazy-evaluation stepper</a><a href="#method">A quick method</a><a href="#count">Count the jobs</a></div>
+
+  <section id="stepper">
+    <h2>Lazy evaluation, step by step</h2>
+    <p>Run the pipeline one line at a time. The plan grows while "rows read" stays at zero, until the action.</p>
+  </section>
+</div>
+
+<div class="wide">
+  <div class="stepper">
+    <div>
+      <div class="codelines" id="code"></div>
+      <div class="ctrl">
+        <button class="btn ghost" id="prev">← Back</button>
+        <button class="btn" id="nxt">Run next line →</button>
+        <button class="btn ghost" id="rst">Reset</button>
+      </div>
+    </div>
+    <div>
+      <div class="counters" id="ctr"></div>
+      <div class="planview" id="plan" style="margin-top:.7rem" aria-live="polite"></div>
+      <div class="note" id="why"></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <section id="method">
+    <h2>A quick method for counting</h2>
+    <ol class="rail">
+      <li><div><b>Jobs:</b> count the actions (<code>count</code>, <code>show</code>, <code>collect</code>, <code>write</code>, <code>toPandas</code>…). Add one for schema inference on CSV/JSON, and expect extras for sorts and broadcasts.</div></li>
+      <li><div><b>Stages:</b> for each job, count the shuffles (<code>groupBy</code>, sort-merge <code>join</code>, <code>distinct</code>, <code>orderBy</code>, <code>repartition</code>), then add one per independent input branch plus the final stage. Or count <code>Exchange</code> nodes in <code>explain()</code>.</div></li>
+      <li><div><b>Tasks:</b> per stage, the number of partitions: input splits for scans, <code>spark.sql.shuffle.partitions</code> after a shuffle.</div></li>
+      <li><div><b>Reads:</b> each action re-reads its source unless something upstream is cached.</div></li>
+    </ol>
+  </section>
+
+  <section id="count">
+    <h2>Count the jobs and stages</h2>
+    <p>Work each one out before opening the answer.</p>
+    <div class="qa">
+      <details><summary>1 · A simple filter and write</summary><div>
+<pre><code>spark.read.parquet(p).filter("amount > 0").write.parquet(q)</code></pre>
+        <b>1 job</b> (plus possibly a tiny file-listing job), <b>1 stage</b>: no shuffle, so read → filter → write is pipelined. Tasks = number of input splits.</div></details>
+      <details><summary>2 · Group and show</summary><div>
+<pre><code>df.groupBy("segment").count().show()</code></pre>
+        <b>1 action</b>, <b>2 stages</b>: scan + partial count, then the final count after the shuffle. With AQE the Jobs tab may show it as two jobs because query stages run separately; the SQL tab shows it as one query.</div></details>
+      <details><summary>3 · Join, aggregate, write</summary><div>
+<pre><code>(orders.filter("country = 'AE'")
+       .join(customers, "cust_id")
+       .groupBy("segment").agg(F.sum("amount"))
+       .write.saveAsTable("gold.sales"))</code></pre>
+        <b>1 job</b>, <b>4 stages</b>: scan orders and scan customers (both shuffle by <code>cust_id</code>), the join plus partial sum (shuffles by <code>segment</code>), then the final sum and write. If <code>customers</code> is broadcast: <b>3 stages</b>, because the orders side isn't shuffled for the join.</div></details>
+      <details><summary>4 · Count, then write</summary><div>
+<pre><code>df = spark.read.parquet(p).filter("country = 'AE'")
+print(df.count())
+df.write.parquet(q)</code></pre>
+        <b>2 jobs</b>, and the Parquet files are <b>read twice</b>. With <code>df.cache()</code> before the count it's still 2 jobs, but the second reads from the cache. Often the better fix is to drop the debug <code>count()</code>.</div></details>
+      <details><summary>5 · A loop of writes</summary><div>
+<pre><code>for d in ["2026-10-01", "2026-10-02", "2026-10-03"]:
+    df.filter(F.col("dt") == d).write.mode("overwrite").parquet(f"{q}/dt={d}")</code></pre>
+        <b>3 jobs</b>, run one after another, each with its own scan (pruned to that date if the source is partitioned by <code>dt</code>). One write with <code>.write.partitionBy("dt")</code> does it in <b>1 job</b>.</div></details>
+      <details><summary>6 · CSV with schema inference</summary><div>
+<pre><code>(spark.read.option("header", True).option("inferSchema", True).csv(p)
+      .filter("amount > 0").count())</code></pre>
+        <b>2 jobs</b>: one scans the data to infer column types, then the count. Passing an explicit schema removes the first job, which on large files is a full extra pass.</div></details>
+      <details><summary>7 · Harder: distinct, sort, collect</summary><div>
+<pre><code>df.select("segment").distinct().orderBy("segment").collect()</code></pre>
+        Two shuffles (<code>distinct</code>, then a range-partitioned sort), so <b>3 stages</b> of real work. The sort needs to know the key ranges, so Spark also runs a small <b>sampling job</b> first. Expect at least <b>2 jobs</b> in the UI for one <code>collect</code>.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const LINES=[
+    ['orders = spark.read.parquet("s3://lake/orders")', [["Scan orders","narrow"]], 'Only file metadata and the schema are read. No rows yet. (Spark may run a small listing job for many files.)', false],
+    ['ae = orders.filter(col("country") == "AE")', [["Filter country = AE","narrow"]], 'Narrow transformation. Added to the plan. Catalyst will later push this filter into the scan.', false],
+    ['cust = spark.table("ref.customers")', [["Scan customers","narrow"]], 'A second input. Still nothing executed.', false],
+    ['j = ae.join(cust, "cust_id")', [["Join on cust_id  ⇢ shuffle (or broadcast)","wide"]], 'Wide: matching keys must meet on the same executor. Unless customers is small enough to broadcast, both sides will be shuffled by cust_id.', false],
+    ['out = j.groupBy("segment").agg(sum("amount"))', [["Aggregate by segment  ⇢ shuffle","wide"]], 'Wide again: all rows of one segment must meet. Spark plans a partial sum before the shuffle and a final sum after it.', false],
+    ['out.write.mode("overwrite").saveAsTable("gold.sales_by_segment")', [["ACTION: write → Job 1 starts","act"]], 'The action. Catalyst optimises the whole plan, the DAG scheduler cuts it into 4 stages at the 3 shuffles, and tasks start reading files. The overview page shows these four stages as a diagram.', true]
+  ];
+  let step=-1;
+  function render(){
+    $("code").innerHTML=LINES.map((l,i)=>`<div class="${i<step?'done':i===step?'cur':''}">${l[0].replace(/&/g,"&amp;").replace(/</g,"&lt;")}</div>`).join("");
+    let nodes=[];for(let i=0;i<=step;i++)nodes=nodes.concat(LINES[i][1].map(n=>[...n,i===step]));
+    $("plan").innerHTML=nodes.length?nodes.map(([t,c,isNew])=>`<div class="pnode ${c}${isNew?' new':''}">${t}</div>`).join(""):'<div class="pnode">Logical plan is empty</div>';
+    const acted=step>=0&&LINES[step][3];
+    $("ctr").innerHTML=`<span class="chip">plan nodes: ${nodes.length}</span><span class="chip ${acted?'ok':''}">jobs: ${acted?1:0}</span><span class="chip ${acted?'ok':'bad'}">rows read: ${acted?'millions':'0'}</span>`;
+    $("why").textContent=step<0?'Press "Run next line" to execute the first line of code.':LINES[step][2];
+    $("prev").disabled=step<0;$("nxt").disabled=step>=LINES.length-1;
+  }
+  $("nxt").onclick=()=>{if(step<LINES.length-1){step++;render()}};
+  $("prev").onclick=()=>{if(step>=0){step--;render()}};
+  $("rst").onclick=()=>{step=-1;render()};
+  render();
+
+})();
+</script>
+</body></html>

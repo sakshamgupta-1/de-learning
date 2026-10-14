@@ -12,7 +12,7 @@
     <a href="index.html" aria-current="page">Background</a>
     <a href="../architecture/index.html">1 · Architecture</a>
     <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
-    <a href="../../spark-execution.html">3 · Execution</a>
+    <a href="../execution/index.html">3 · Execution</a>
     <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
     <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
   </nav>
@@ -147,9 +147,9 @@
     <div class="tbl"><table>
       <thead><tr><th>MapReduce idea</th><th>In Spark</th><th>Where we cover it</th></tr></thead>
       <tbody>
-        <tr><td>Map phase</td><td>Narrow transformations (<code>map</code>, <code>filter</code>, <code>select</code>), pipelined in one stage</td><td><a href="../../spark-execution.html#narrow-wide">Execution</a></td></tr>
-        <tr><td>Shuffle &amp; sort</td><td>Wide transformations; an <code>Exchange</code> in the plan; a stage boundary</td><td><a href="../../spark-execution.html#narrow-wide">Execution</a></td></tr>
-        <tr><td>Combiner</td><td>Map-side combine: <code>reduceByKey</code>, and <code>partial_sum</code> before the shuffle in DataFrame plans</td><td><a href="../../spark-execution.html#rbk">reduceByKey vs groupByKey</a></td></tr>
+        <tr><td>Map phase</td><td>Narrow transformations (<code>map</code>, <code>filter</code>, <code>select</code>), pipelined in one stage</td><td><a href="../execution/index.html#narrow-wide">Execution</a></td></tr>
+        <tr><td>Shuffle &amp; sort</td><td>Wide transformations; an <code>Exchange</code> in the plan; a stage boundary</td><td><a href="../execution/index.html#narrow-wide">Execution</a></td></tr>
+        <tr><td>Combiner</td><td>Map-side combine: <code>reduceByKey</code>, and <code>partial_sum</code> before the shuffle in DataFrame plans</td><td><a href="../execution/deep-dive.html#rbk">reduceByKey vs groupByKey</a></td></tr>
         <tr><td>Partitioner</td><td><code>hashpartitioning(key, n)</code>; <code>spark.sql.shuffle.partitions</code></td><td><a href="../../spark-tuning.html#partitions">Partition sizing</a></td></tr>
         <tr><td>Data locality</td><td>Task scheduler prefers executors that hold the data</td><td><a href="../architecture/index.html#components">Architecture</a></td></tr>
         <tr><td>YARN containers</td><td>Spark executors run in YARN containers (or Kubernetes pods)</td><td><a href="../architecture/index.html#memory">Executor memory</a></td></tr>
