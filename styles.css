@@ -236,7 +236,6 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var
 .topic.done .ttl{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}
 .topic .go{font-size:.8rem;white-space:nowrap}
 .topic .soon{font:.72rem var(--mono);color:var(--muted)}
-.star{font:600 .66rem var(--mono);color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:.12rem .35rem;margin-left:.4rem;vertical-align:.1em;white-space:nowrap}
 @media (max-width:520px){.topic{grid-template-columns:auto 1.8rem minmax(0,1fr)}.topic .go,.topic .soon{grid-column:3}}
 
 /* module navigation: breadcrumb + module tabs (overview-first structure) */
