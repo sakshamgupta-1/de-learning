@@ -22,6 +22,7 @@
   <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">RDD, DataFrame, Dataset &amp; pandas</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
   <nav class="mtabs" aria-label="Module pages">
     <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
     <a href="examples.html">Examples</a>
     <a href="production.html" aria-current="page">Production issues</a>
   </nav>
@@ -115,7 +116,7 @@ Attempting non-optimization as
       <h3>Fix</h3>
       <ul>
         <li>Rewrite with built-in functions where possible: the biggest win.</li>
-        <li>Otherwise use a <b>pandas UDF</b>: Arrow batches and vectorised pandas or NumPy code.</li>
+        <li>Otherwise use a <b>pandas UDF</b>: Arrow batches and vectorised pandas or NumPy code (<a href="deep-dive.html#boundary">why it's faster</a>).</li>
         <li>On Spark 3.5+, an <b>Arrow-optimised Python UDF</b> (<code>@udf(useArrow=True)</code>) keeps row-wise code but speeds up data transfer.</li>
         <li>Apply UDFs after filtering, so fewer rows reach Python.</li>
       </ul>
