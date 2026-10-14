@@ -129,6 +129,31 @@ The hub's progress is stored in each reader's browser under the localStorage key
 - Each module should answer, across its pages: what it is, why it matters, how it breaks, how to explain it in an interview.
 - Code samples should be runnable PySpark or Spark SQL, with comments only where they add meaning.
 
+## Visuals: make flows interactive
+
+**Directive:** when a diagram shows steps, a sequence, a flow over time, or a before/after comparison, build it as an **interactive visual** that the reader can play or step through, not only as a static picture. A static diagram is fine for structure that doesn't change (an architecture, a hierarchy, a memory layout).
+
+| The diagram shows… | Build it as |
+| --- | --- |
+| Ordered steps (plan building, a request flow, a debug path) | A **stepper**: Back / Next / Reset, highlighting the current step and explaining it below |
+| Something happening over time (tasks in waves, data moving, executors scaling) | An **animation** with Play / Pause / Reset and live counters |
+| Two approaches compared (row vs columnar, Python UDF vs pandas UDF, with and without AQE) | A **side-by-side run**, or tabs that switch between them, with the same counters for both |
+| A decision path (which error → which fix) | A **clickable flowchart** that jumps to the matching section |
+| A calculation (memory per task, partitions, executor sizing) | A **calculator** with labelled inputs and result tiles |
+
+Existing examples to copy from: the lazy-evaluation stepper (`spark/execution/examples.html`), the Python UDF vs pandas UDF race and row/columnar scan (`spark/data-abstractions/deep-dive.html`), the debug flowchart (`spark-tuning.html`) and the memory calculator (`spark/architecture/deep-dive.html`).
+
+Rules for interactive visuals:
+
+- **Readable at rest.** Before anyone clicks, the visual shows a meaningful starting state, and the surrounding text explains the point on its own. Nothing important is hidden behind the animation.
+- **The reader is in control.** Animations start only from a button, never automatically, and always offer Pause or Reset. No GIFs or videos: they can't be paused, are heavy, and don't follow the theme.
+- **Respect reduced motion.** If `prefers-reduced-motion: reduce` is set, a Play button jumps straight to the final state instead of animating.
+- **Plain inline SVG + vanilla JavaScript.** No libraries or CDNs. Draw with the existing SVG classes and colour tokens so it works in light and dark themes. Elements the script moves can be created once and repositioned, rather than rebuilt every frame.
+- **Accessible controls.** Real `<button>` elements with clear labels; live counters in a container with `aria-live="polite"`; the `<svg>` keeps `role="img"` and a `<title>`.
+- **Honest numbers.** Simulated timings or sizes are labelled as illustrative ("Timing is illustrative, not a benchmark"). Only state real figures with a source.
+- **Phone width.** The SVG sits in a `.fig` container that scrolls horizontally on narrow screens; the controls and counters below it must wrap.
+- **Test it.** Click through every control once, including Reset and replaying after the end, and check the browser console for errors.
+
 ## Before opening a PR
 
 ```bash
