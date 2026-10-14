@@ -47,14 +47,18 @@ The hub started as a personal prep tool and is now open to friends for review an
   # then open http://localhost:8000
   ```
 
-## Each module page follows the same learning flow
+## How each module is organised
 
-1. **Concept**: what it is and why it matters, in plain language
-2. **Picture**: a diagram of the mechanism
-3. **Worked example**: real code, plans or numbers
-4. **What breaks**: traps, failure scenarios and how to debug them
-5. **Say it in an interview**: a short answer you can give out loud
-6. **Check yourself**: questions with answers hidden until clicked
+Every topic is a module with **a short overview first and depth on demand**:
+
+- **Overview** (always there): a refresher you can read in about 10 minutes. It covers what the topic is, one core diagram, a cheat sheet of key facts, ready-made interview answers and a quick self-check. Come back to it the day before an interview.
+- **Sub-pages** (only where there's enough to say):
+  - **Deep dive**: internals, edge cases, config details
+  - **Examples**: runnable code, plans, worked numbers, interactive demos
+  - **Real-world use cases**: patterns at scale and system-design trade-offs
+  - **Production issues**: common failures, how to confirm them, fixes and prevention
+
+Modules live in folders by area, for example `spark/architecture/`. The four Spark Core pages at the root predate this layout and are being moved into it one module at a time. See [AGENTS.md](AGENTS.md) for the full structure.
 
 ## Contributing
 
