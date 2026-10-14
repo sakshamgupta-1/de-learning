@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Catalyst and AQE Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="index.html" aria-current="page">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Catalyst, joins &amp; AQE</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 4 · Deep dive</p>
+  <h1>Inside Catalyst and AQE</h1>
+  <p class="lede">Follow one query through every Catalyst phase, see individual optimiser rules at work, try pushdown and pruning on a simulated table, and watch AQE's three runtime rewrites. Start with the <a href="index.html">overview</a> for the basics.</p>
+  <div class="toc">
+    <a href="#catalyst-steps">Catalyst, step by step</a><a href="#rules">Optimiser rules</a><a href="#cbo">Statistics &amp; CBO</a><a href="#pushdown">Pushdown simulator</a><a href="#dpp">Dynamic partition pruning</a><a href="#aqe">AQE rewrites</a><a href="#codegen">Codegen &amp; Photon</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="catalyst-steps">
+    <h2>Catalyst, step by step</h2>
+    <p>One query, five plans. Step through to see what each phase changes. Column suffixes like <code>#12</code> are the unique IDs that analysis gives every attribute.</p>
+<pre><code>(spark.table("orders").join(spark.table("customers"), "cust_id")
+      .filter("country = 'AE'")
+      .groupBy("segment").agg(F.sum("amount")))</code></pre>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 1000 200" role="img" aria-labelledby="catT2">
+  <title id="catT2">Catalyst pipeline from query to generated code</title>
+  <defs><marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect id="cs0" class="bx2" x="10" y="40" width="140" height="72" rx="8"/><text class="tb" x="80" y="72" text-anchor="middle">SQL / DataFrame</text><text class="ts" x="80" y="92" text-anchor="middle">your query</text>
+  <rect id="cs1" class="bx" x="176" y="40" width="140" height="72" rx="8"/><text class="tb" x="246" y="72" text-anchor="middle">Unresolved</text><text class="ts" x="246" y="92" text-anchor="middle">logical plan</text>
+  <rect id="cs2" class="bx" x="342" y="40" width="140" height="72" rx="8"/><text class="tb" x="412" y="72" text-anchor="middle">Analyzed</text><text class="ts" x="412" y="92" text-anchor="middle">logical plan</text>
+  <rect id="cs3" class="bxb" x="508" y="40" width="140" height="72" rx="8"/><text class="tb" x="578" y="72" text-anchor="middle">Optimized</text><text class="ts" x="578" y="92" text-anchor="middle">logical plan</text>
+  <rect id="cs4" class="bxa" x="674" y="40" width="140" height="72" rx="8"/><text class="tb" x="744" y="72" text-anchor="middle">Physical plan</text><text class="ts" x="744" y="92" text-anchor="middle">selected by cost</text>
+  <rect id="cs5" class="bxo" x="840" y="40" width="150" height="72" rx="8"/><text class="tb" x="915" y="72" text-anchor="middle">Generated code</text><text class="ts" x="915" y="92" text-anchor="middle">runs as RDD tasks</text>
+  <line class="ln" x1="150" y1="76" x2="172" y2="76" marker-end="url(#d2)"/>
+  <line class="ln" x1="316" y1="76" x2="338" y2="76" marker-end="url(#d2)"/>
+  <line class="ln" x1="482" y1="76" x2="504" y2="76" marker-end="url(#d2)"/>
+  <line class="ln" x1="648" y1="76" x2="670" y2="76" marker-end="url(#d2)"/>
+  <line class="ln" x1="814" y1="76" x2="836" y2="76" marker-end="url(#d2)"/>
+  <text class="tm" x="163" y="140" text-anchor="middle">parse</text>
+  <text class="tm" x="329" y="140" text-anchor="middle">1 · analysis</text><text class="ts" x="329" y="158" text-anchor="middle">resolve names</text><text class="ts" x="329" y="174" text-anchor="middle">via catalog</text>
+  <text class="tm" x="495" y="140" text-anchor="middle">2 · logical opt.</text><text class="ts" x="495" y="158" text-anchor="middle">rule-based</text><text class="ts" x="495" y="174" text-anchor="middle">rewrites</text>
+  <text class="tm" x="661" y="140" text-anchor="middle">3 · physical</text><text class="ts" x="661" y="158" text-anchor="middle">pick joins,</text><text class="ts" x="661" y="174" text-anchor="middle">aggregations</text>
+  <text class="tm" x="827" y="140" text-anchor="middle">4 · codegen</text><text class="ts" x="827" y="158" text-anchor="middle">whole-stage</text><text class="ts" x="827" y="174" text-anchor="middle">Java bytecode</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="calc" style="margin-top:0">
+    <div class="ctrl" style="margin-top:0">
+      <button class="btn ghost" id="cPrev">← Back</button>
+      <button class="btn" id="cNext">Next phase →</button>
+      <button class="btn ghost" id="cReset">Reset</button>
+      <span class="chip acc" id="cLabel"></span>
+    </div>
+    <pre id="cPlan" style="margin-bottom:0"></pre>
+    <div class="note" id="cNote"></div>
+  </div>
+
+  <section id="rules">
+    <h2>Optimiser rules, before and after</h2>
+    <p>Logical optimisation is a set of rules applied repeatedly until the plan stops changing. Pick one to see its effect.</p>
+    <div class="seg" role="tablist" id="ruleTabs"></div>
+    <div class="ba">
+      <div><h4>Before</h4><pre id="rb" style="margin:0"></pre></div>
+      <div><h4>After</h4><pre id="ra" style="margin:0"></pre></div>
+    </div>
+    <p id="rx" class="note"></p>
+  </section>
+
+  <section id="cbo">
+    <h2>Statistics and the cost-based optimiser</h2>
+    <p>Physical planning needs sizes: is this table small enough to broadcast? Spark gets them from <b>statistics</b>.</p>
+    <ul>
+      <li><b>Without collected statistics</b>, Spark estimates size from file sizes on disk. That's fine for raw scans, but after filters and joins estimates can be far off. Compressed files also expand several times in memory.</li>
+      <li><b>Table and column statistics</b> (<code>ANALYZE TABLE t COMPUTE STATISTICS FOR ALL COLUMNS</code>) record row counts, distinct values, min/max and null counts. Delta tables keep file-level statistics automatically.</li>
+      <li><b>The cost-based optimiser</b> (<code>spark.sql.cbo.enabled</code>, off by default) uses column statistics to estimate filter selectivity and, with <code>spark.sql.cbo.joinReorder.enabled</code>, to <b>reorder multi-way joins</b> so the most selective joins run first.</li>
+      <li><b>AQE</b> sidesteps much of this: it measures real shuffle sizes at runtime and corrects the plan between stages, which is why it's on by default and CBO isn't.</li>
+    </ul>
+    <div class="callout trap"><div class="lbl">Stale statistics are worse than none</div>If a table grew 100× since it was analysed, Spark may still think it's small and broadcast it, causing driver OOM or broadcast timeouts. Re-analyse after big loads, or rely on AQE and sensible thresholds.</div>
+  </section>
+
+  <section id="pushdown">
+    <h2>Pushdown and pruning simulator</h2>
+    <p>An <code>orders</code> table partitioned by <code>dt</code>: three folders, each with four Parquet row groups. Each tile shows the min–max of <code>country</code> in that row group. Pick a query to see what Spark actually reads.</p>
+    <div class="seg" role="tablist" id="pdTabs">
+      <button role="tab" aria-selected="true" data-q="0">country = 'AE'</button>
+      <button role="tab" aria-selected="false" data-q="1">upper(country) = 'AE'</button>
+      <button role="tab" aria-selected="false" data-q="2">dt = '2026-10-02'</button>
+      <button role="tab" aria-selected="false" data-q="3">dt = '2026-10-02' AND country = 'AE'</button>
+      <button role="tab" aria-selected="false" data-q="4">country = 'AE' on CSV</button>
+    </div>
+    <div class="pd-grid" id="pdGrid" aria-live="polite"></div>
+    <div class="out" id="pdOut"></div>
+    <pre id="pdPlan" style="margin-top:.8rem"></pre>
+    <p id="pdNote" class="note"></p>
+  </section>
+
+  <section id="dpp">
+    <h2>Dynamic partition pruning</h2>
+    <p>Static partition pruning needs a filter on the partition column itself. Often the filter is on a <b>dimension</b> instead:</p>
+<pre><code>SELECT f.*
+FROM sales f                       -- partitioned by date_key
+JOIN dim_date d ON f.date_key = d.date_key
+WHERE d.fiscal_quarter = 'FY26-Q2'</code></pre>
+    <p>Nothing filters <code>sales.date_key</code> directly, so static pruning reads every partition. With <b>dynamic partition pruning</b> (Spark 3.0+, on by default), Spark first runs the filtered dimension side, collects the matching <code>date_key</code> values, and injects them as a partition filter on <code>sales</code> at runtime, so only those partitions are read. It works best when the dimension side is small enough to broadcast. You'll see <code>dynamicpruningexpression</code> in the scan's <code>PartitionFilters</code>.</p>
+  </section>
+
+  <section id="aqe">
+    <h2>AQE's three rewrites</h2>
+    <p>AQE turns one query into a series of <b>query stages</b>. After each stage finishes, it looks at the real shuffle statistics and re-plans what's left.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 220" role="img" aria-labelledby="aqeT">
+  <title id="aqeT">AQE loop: run a query stage, collect shuffle statistics, re-optimise the remaining plan</title>
+  <defs><marker id="e1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect class="bx2" x="20" y="74" width="160" height="66" rx="8"/><text class="tb" x="100" y="103" text-anchor="middle">Initial physical</text><text class="ts" x="100" y="122" text-anchor="middle">plan (estimates)</text>
+  <rect class="bxb" x="250" y="74" width="170" height="66" rx="8"/><text class="tb" x="335" y="103" text-anchor="middle">Run query stage</text><text class="ts" x="335" y="122" text-anchor="middle">up to a shuffle</text>
+  <rect class="bxa" x="490" y="74" width="170" height="66" rx="8"/><text class="tb" x="575" y="103" text-anchor="middle">Measure</text><text class="ts" x="575" y="122" text-anchor="middle">real partition sizes</text>
+  <rect class="bxo" x="730" y="74" width="150" height="66" rx="8"/><text class="tb" x="805" y="103" text-anchor="middle">Re-optimise</text><text class="ts" x="805" y="122" text-anchor="middle">rest of the plan</text>
+  <line class="lna" x1="180" y1="107" x2="246" y2="107" marker-end="url(#e1)"/>
+  <line class="lna" x1="420" y1="107" x2="486" y2="107" marker-end="url(#e1)"/>
+  <line class="lna" x1="660" y1="107" x2="726" y2="107" marker-end="url(#e1)"/>
+  <path class="lna" d="M805,140 C805,200 335,200 335,144" marker-end="url(#e1)"/>
+  <text class="ts" x="570" y="196" text-anchor="middle">repeat for each remaining stage</text>
+  <text class="tm" x="805" y="40" text-anchor="middle">coalesce · switch join · split skew</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="seg" role="tablist" id="aqeTabs">
+    <button role="tab" aria-selected="true" data-k="co">Coalesce partitions</button>
+    <button role="tab" aria-selected="false" data-k="js">Switch join strategy</button>
+    <button role="tab" aria-selected="false" data-k="sk">Split skewed partitions</button>
+  </div>
+  <div class="ba">
+    <div><h4>Without AQE</h4><div class="bars" id="bBefore"></div><div class="bars-lbl" id="lBefore"></div></div>
+    <div><h4>With AQE</h4><div class="bars" id="bAfter"></div><div class="bars-lbl" id="lAfter"></div></div>
+  </div>
+  <div class="note" id="aqeText"></div>
+
+  <h3>Configs worth naming</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Config</th><th class="num">Default</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>spark.sql.adaptive.enabled</code></td><td class="num">true</td><td>Turns AQE on (Spark 3.2+)</td></tr>
+      <tr><td><code>…adaptive.coalescePartitions.enabled</code></td><td class="num">true</td><td>Merge small post-shuffle partitions</td></tr>
+      <tr><td><code>…adaptive.advisoryPartitionSizeInBytes</code></td><td class="num">64 MB</td><td>Target size when coalescing or splitting</td></tr>
+      <tr><td><code>…adaptive.autoBroadcastJoinThreshold</code></td><td class="num">= static threshold</td><td>Runtime broadcast limit used when switching joins</td></tr>
+      <tr><td><code>…adaptive.skewJoin.enabled</code></td><td class="num">true</td><td>Split skewed partitions in sort-merge joins</td></tr>
+      <tr><td><code>…skewJoin.skewedPartitionFactor</code></td><td class="num">5</td><td>Skewed if more than 5 × the median …</td></tr>
+      <tr><td><code>…skewJoin.skewedPartitionThresholdInBytes</code></td><td class="num">256 MB</td><td>… and also larger than this</td></tr>
+    </tbody></table></div>
+  <div class="callout trap"><div class="lbl">What AQE can't fix</div>Skew in a <code>groupBy</code> aggregation or window function (skew handling covers joins only), the very first scan stage (there are no statistics yet), a bad file layout, or a slow Python UDF. Those still need salting, repartitioning or redesign.</div>
+
+  <section id="codegen">
+    <h2>Whole-stage codegen and Photon</h2>
+    <p>After physical planning, <b>Tungsten whole-stage code generation</b> fuses all operators between two exchanges into a single Java function, then compiles it. Instead of each operator calling the next for every row, one tight loop handles a row from scan to output. In plain <code>explain()</code> output these operators are prefixed <code>*(n)</code>, where <code>n</code> is the codegen block.</p>
+    <p>Some operators can't be fused, for example Python UDFs and some complex expressions, so they break the block and fall back to slower row-by-row evaluation. On Databricks, <b>Photon</b> takes a different approach: a vectorised C++ engine that processes column batches (see <a href="../data-abstractions/deep-dive.html#three-meanings">three meanings of "vectorised"</a>).</p>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>In which Catalyst phase is a misspelt column caught, and in which is the join strategy chosen?</summary><div>A misspelt column fails in <b>analysis</b>. The join strategy is chosen in <b>physical planning</b>, and AQE may change it again at runtime.</div></details>
+      <details><summary>Why does <code>upper(country) = 'AE'</code> read every row group?</summary><div>Row-group statistics are min/max of the raw <code>country</code> values. Spark can't map a condition on <code>upper(country)</code> back to those ranges, so nothing can be skipped. Store a normalised column, or filter on raw values.</div></details>
+      <details><summary>When does dynamic partition pruning help?</summary><div>When a large fact table partitioned by a key is joined to a dimension, and the filter is on the dimension rather than on the fact's partition column. The filtered dimension's keys prune the fact's partitions at runtime.</div></details>
+      <details><summary>Why is AQE on by default but the cost-based optimiser isn't?</summary><div>CBO depends on accurate, up-to-date column statistics, which many tables don't have. AQE uses real sizes measured during execution, so it works without any preparation.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  /* Catalyst stepper */
+  const STEPS=[
+    ["Your query",`DataFrame / SQL code
+  → parsed into a tree of operations`,"Python or SQL only describes the query. Spark parses it into an unresolved logical plan."],
+    ["1 · Unresolved logical plan",`'Aggregate ['segment], ['segment, unresolvedalias('sum('amount))]
++- 'Filter ('country = AE)
+   +- 'Join UsingJoin(Inner, [cust_id])
+      :- 'UnresolvedRelation [orders]
+      +- 'UnresolvedRelation [customers]`,"Names are just strings (marked with '). Spark doesn't yet know if orders exists or what type amount is."],
+    ["2 · Analyzed logical plan",`Aggregate [segment#21], [segment#21, sum(amount#12) AS sum(amount)#40]
++- Filter (country#13 = AE)
+   +- Project [cust_id#10, amount#12, country#13, segment#21, …]
+      +- Join Inner, (cust_id#10 = cust_id#20)
+         :- Relation orders[cust_id#10, amount#12, country#13, … 42 columns] parquet
+         +- Relation customers[cust_id#20, segment#21, … 18 columns] parquet`,"Analysis looked up both tables in the catalog, resolved every column to a unique ID and checked types. A misspelt column would fail right here."],
+    ["3 · Optimized logical plan",`Aggregate [segment#21], [segment#21, sum(amount#12) AS sum(amount)#40]
++- Project [amount#12, segment#21]
+   +- Join Inner, (cust_id#10 = cust_id#20)
+      :- Project [cust_id#10, amount#12]
+      :  +- Filter (isnotnull(country#13) AND (country#13 = AE) AND isnotnull(cust_id#10))
+      :     +- Relation orders[…] parquet
+      +- Project [cust_id#20, segment#21]
+         +- Filter isnotnull(cust_id#20)
+            +- Relation customers[…] parquet`,"Rules rewrote the plan: the filter was pushed below the join onto orders, only the 4 needed columns are kept, and not-null filters on the join keys were inferred."],
+    ["4 · Physical plan",`HashAggregate(keys=[segment#21], functions=[sum(amount#12)])
++- Exchange hashpartitioning(segment#21, 200)
+   +- HashAggregate(keys=[segment#21], functions=[partial_sum(amount#12)])
+      +- Project [amount#12, segment#21]
+         +- BroadcastHashJoin [cust_id#10], [cust_id#20], Inner, BuildRight
+            :- Filter (isnotnull(country#13) AND (country#13 = AE) …)
+            :  +- FileScan parquet orders[cust_id#10,amount#12,country#13]
+            :       PushedFilters: [IsNotNull(country), EqualTo(country,AE), IsNotNull(cust_id)]
+            +- BroadcastExchange HashedRelationBroadcastMode(…)
+               +- Filter isnotnull(cust_id#20)
+                  +- FileScan parquet customers[cust_id#20,segment#21]`,"Physical planning chose concrete operators: a broadcast hash join because customers is small, a two-step hash aggregate with a shuffle between, and file scans with the filters pushed into the Parquet reader."],
+    ["5 · Generated code",`*(2) HashAggregate(keys=[segment#21], functions=[sum(amount#12)])
++- Exchange hashpartitioning(segment#21, 200)
+   +- *(1) HashAggregate(keys=[segment#21], functions=[partial_sum(amount#12)])
+      +- *(1) Project [amount#12, segment#21]
+         +- *(1) BroadcastHashJoin [cust_id#10], [cust_id#20], Inner, BuildRight
+            :- *(1) Filter (…)
+            :  +- *(1) ColumnarToRow
+            :     +- FileScan parquet orders[…]
+            +- BroadcastExchange …`,"Whole-stage codegen fused everything marked *(1) into one compiled Java function, and *(2) into another. The Exchange (shuffle) sits between them. These run as tasks on executors."]
+  ];
+  let cs=0;
+  function cRender(){
+    for(let i=0;i<6;i++){const r=$("cs"+i);if(r)r.classList.toggle("hit",i===cs);}
+    $("cLabel").textContent=STEPS[cs][0]; $("cPlan").textContent=STEPS[cs][1]; $("cNote").textContent=STEPS[cs][2];
+    $("cPrev").disabled=cs===0; $("cNext").disabled=cs===STEPS.length-1;
+  }
+  $("cNext").onclick=()=>{if(cs<STEPS.length-1){cs++;cRender()}};
+  $("cPrev").onclick=()=>{if(cs>0){cs--;cRender()}};
+  $("cReset").onclick=()=>{cs=0;cRender()};
+  cRender();
+
+  /* Rule tabs */
+  const RULES={
+    "Predicate pushdown":[`Filter (country = 'AE')
++- Project [cust_id, amount, country, ...]
+   +- Relation orders [42 columns]`,
+`Project [cust_id, amount]
++- Relation orders
+     PushedFilters: [country = 'AE']`,
+     "The filter moves below the projection and into the scan. The Parquet reader then skips row groups whose min/max for country can't contain 'AE'."],
+    "Column pruning":[`Project [segment, total]
++- Aggregate [segment] sum(amount) AS total
+   +- Join cust_id
+      :- Relation orders [42 columns]
+      +- Relation customers [18 columns]`,
+`Project [segment, total]
++- Aggregate [segment] sum(amount) AS total
+   +- Join cust_id
+      :- Project [cust_id, amount]
+      +- Project [cust_id, segment]`,
+     "Only 4 of 60 columns are needed, so only those are read from the columnar files. A SELECT * early in a pipeline can defeat this if later steps keep every column."],
+    "Constant folding":[`Filter (amount > 10 * 1000)
++- Filter (status = 'PAID')
+   +- Relation orders`,
+`Filter (status = 'PAID' AND amount > 10000)
++- Relation orders`,
+     "Constant expressions are computed once at planning time, and adjacent filters are combined into one, so each row is evaluated once."],
+    "Join reordering":[`Join d.id = f.store_id
++- Join f.prod_id = p.id
+   :- fact_sales (2 B rows)
+   +- product (50 K rows)
++- store (filtered to 10 rows)`,
+`Join f.prod_id = p.id
++- Join f.store_id = d.id
+   :- fact_sales (2 B rows)
+   +- store (10 rows)
++- product (50 K rows)`,
+     "With table statistics and the cost-based optimizer (spark.sql.cbo.enabled, ANALYZE TABLE … COMPUTE STATISTICS), Spark joins the most selective dimension first so later joins handle fewer rows."]
+  };
+  const tabs=$("ruleTabs");
+  Object.keys(RULES).forEach((k,i)=>{const b=document.createElement("button");b.textContent=k;b.setAttribute("role","tab");b.setAttribute("aria-selected",i===0);
+    b.onclick=()=>{tabs.querySelectorAll("button").forEach(x=>x.setAttribute("aria-selected",x===b));showRule(k)};tabs.appendChild(b)});
+  function showRule(k){$("rb").textContent=RULES[k][0];$("ra").textContent=RULES[k][1];$("rx").textContent=RULES[k][2]}
+  showRule("Predicate pushdown");
+
+  /* Pushdown simulator */
+  const FOLDERS=[["2026-10-01",[["AE","AE"],["AE","IN"],["GB","US"],["IN","SA"]]],
+                 ["2026-10-02",[["AE","GB"],["IN","IN"],["SA","US"],["AE","AE"]]],
+                 ["2026-10-03",[["GB","IN"],["AE","SA"],["US","US"],["IN","US"]]]];
+  const Q=[
+    {dt:null,val:"AE",push:true,plan:"PartitionFilters: []\nPushedFilters: [IsNotNull(country), EqualTo(country,AE)]",
+     note:"All three folders are listed (no filter on dt), but the Parquet reader skips every row group whose min–max range can't contain 'AE'."},
+    {dt:null,val:"AE",push:false,plan:"PartitionFilters: []\nPushedFilters: [IsNotNull(country)]\n+ Filter (upper(country) = AE) applied after reading",
+     note:"The function hides the column from the statistics, so nothing can be skipped. Every row group is read and filtered in memory."},
+    {dt:"2026-10-02",val:null,push:false,plan:"PartitionFilters: [isnotnull(dt), (dt = 2026-10-02)]\nPushedFilters: []",
+     note:"Partition pruning: only the dt=2026-10-02 folder is listed and read. The other folders are never opened."},
+    {dt:"2026-10-02",val:"AE",push:true,plan:"PartitionFilters: [isnotnull(dt), (dt = 2026-10-02)]\nPushedFilters: [IsNotNull(country), EqualTo(country,AE)]",
+     note:"Both together: partition pruning picks one folder, then pushdown skips row groups inside it. This is the cheapest query."},
+    {dt:null,val:"AE",push:false,csv:true,plan:"PartitionFilters: []\nPushedFilters: [IsNotNull(country), EqualTo(country,AE)]\n(CSV has no row-group statistics to use)",
+     note:"The filter is pushed to the CSV reader, but CSV files have no min/max statistics, so it can only drop rows after parsing them. Everything is read."}
+  ];
+  function pdRender(q){
+    const c=Q[q]; let folders=0,read=0,total=0,html="";
+    FOLDERS.forEach(([dt,rgs])=>{
+      const pruned=c.dt&&c.dt!==dt; if(!pruned)folders++;
+      html+=`<div class="pd-folder${pruned?" pruned":""}"><div class="pd-head">dt=${dt}${pruned?" · pruned":""}</div>`;
+      rgs.forEach(([lo,hi],i)=>{total++;
+        const skip=pruned||(c.push&&c.val&&!(lo<=c.val&&c.val<=hi));
+        if(!skip)read++;
+        html+=`<div class="pd-rg ${skip?"skip":"read"}"><span>row group ${i+1}</span><b>${lo}–${hi}</b></div>`;});
+      html+="</div>";});
+    $("pdGrid").innerHTML=html;
+    $("pdOut").innerHTML=[[folders+" of 3","folders listed"],[read+" of "+total,"row groups read"],[Math.round(100*(1-read/total))+"%","of the table skipped"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("");
+    $("pdPlan").textContent=c.plan; $("pdNote").textContent=c.note;
+  }
+  document.querySelectorAll("#pdTabs button").forEach(b=>b.onclick=()=>{document.querySelectorAll("#pdTabs button").forEach(x=>x.setAttribute("aria-selected",x===b));pdRender(+b.dataset.q)});
+  pdRender(0);
+
+  /* AQE tabs */
+  function bars(el,arr,cls){el.innerHTML=arr.map((v,i)=>`<span class="${cls?cls(i,v):''}" style="height:${Math.max(2,v)}%"></span>`).join("")}
+  const before200=Array.from({length:60},(_,i)=>4+((i*37)%9));
+  const AQE={
+    co:{b:[before200,null,["200 partitions","~2 MB each"]],a:[[85,92,88,95,90,86,93,89],null,["8 partitions","~64 MB each"]],
+      t:"After a selective filter, the 200 default shuffle partitions are tiny (only 60 shown). That means 200 short tasks and 200 small output files. AQE merges neighbours up to the advisory size, here 8 partitions of about 64 MB."},
+    js:{b:[[70,74,68,72,75,69,71,73],null,["SortMergeJoin","both sides shuffled + sorted"]],a:[[70,74,68,72,75,69,71,73],(i)=>"split",["BroadcastHashJoin","big side not re-sorted"]],
+      t:"The plan estimated the customers side at 400 MB. After the filter ran, the measured shuffle output was 6 MB, so AQE replaced the sort-merge join with a broadcast hash join (or a local shuffled hash join), skipping the sort and the shuffle read of the large side."},
+    sk:{b:[[8,9,7,100,8,9,8,7,9,8],(i)=>i===3?"hot":"",["median 80 MB","one partition 2.4 GB"]],a:[[8,9,7,10,10,10,10,10,10,10,10,10,10,8,9,8,7,9,8],(i)=>i>=3&&i<=12?"split":"",["skewed partition","split into ~10 parts"]],
+      t:"One partition is far larger than the median (>5×) and above 256 MB. In a sort-merge join, AQE splits it into chunks near the advisory size and duplicates the matching partition from the other side, so ten tasks share the work instead of one task running for 40 minutes."}
+  };
+  function showAqe(k){const d=AQE[k];bars($("bBefore"),d.b[0],d.b[1]);bars($("bAfter"),d.a[0],d.a[1]);
+    $("lBefore").innerHTML=d.b[2].map(s=>`<span>${s}</span>`).join("");$("lAfter").innerHTML=d.a[2].map(s=>`<span>${s}</span>`).join("");$("aqeText").textContent=d.t}
+  document.querySelectorAll("#aqeTabs button").forEach(b=>b.onclick=()=>{document.querySelectorAll("#aqeTabs button").forEach(x=>x.setAttribute("aria-selected",x===b));showAqe(b.dataset.k)});
+  showAqe("co");
+})();
+</script>
+</body></html>

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Optimizer Pitfalls</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="index.html" aria-current="page">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Catalyst, joins &amp; AQE</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 4 · Production issues</p>
+  <h1>When the optimiser gets it wrong</h1>
+  <p class="lede">Catalyst and AQE make good choices from what they can see. These problems happen when they can't see enough: hidden columns, stale sizes, missing join keys. Each follows the same path: symptom, why, how to confirm, fix, prevention, interview answer.</p>
+  <div class="toc">
+    <a href="#no-pushdown">Filters not pushed down</a><a href="#partition-filter">Partition column not in the filter</a><a href="#wrong-join">Wrong join strategy</a><a href="#cartesian">Accidental cartesian join</a><a href="#aqe-off">AQE not helping</a><a href="#broadcast-timeout">Broadcast timeout</a><a href="#regression">Plan regressions</a><a href="#interview">Interview questions</a>
+  </div>
+
+  <section id="no-pushdown">
+    <h2>Filters not pushed down</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A query with a selective filter still reads the whole table: the scan's input size in the SQL tab equals the table size, and <code>PushedFilters</code> or <code>PartitionFilters</code> are empty in <code>explain()</code>.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>The column is wrapped in a function: <code>to_date(ts) = …</code>, <code>upper(country) = …</code>, <code>substr(id, 1, 3) = …</code>.</li>
+        <li>The filter uses a Python UDF's output, which Catalyst can't see into.</li>
+        <li>The filter is applied after an operation that blocks pushdown, such as some window functions, or a DataFrame → RDD round-trip.</li>
+        <li>The source has no statistics (CSV, JSON) or the data is so mixed that min/max ranges cover everything.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol><li><code>df.explain("formatted")</code>: check the scan's <code>PushedFilters</code> and <code>PartitionFilters</code>.</li><li>SQL tab: compare "files read" and "size of files read" with the table size.</li></ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Rewrite filters on raw columns: <code>ts &gt;= '2026-10-01' AND ts &lt; '2026-10-02'</code> instead of <code>to_date(ts) = '2026-10-01'</code>.</li>
+        <li>Store normalised or derived columns (for example a <code>country_upper</code> or <code>event_date</code> column) and filter on those.</li>
+        <li>Filter as early as possible, before UDFs and windows.</li>
+        <li>Improve layout so statistics are useful: partition by date, cluster (ZORDER / liquid clustering) by common filter columns.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"I check PushedFilters and PartitionFilters in explain. If they're empty, it's usually a function or UDF wrapped around the column, so I rewrite the filter as a range on the raw column or add a derived column, and make sure data is laid out so min/max statistics can actually skip files."</div>
+    </div>
+  </section>
+
+  <section id="partition-filter">
+    <h2>Filtering on a column the table isn't partitioned by</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A table partitioned by <code>event_date</code> is queried with <code>WHERE event_ts &gt;= '2026-10-01 00:00' AND event_ts &lt; '2026-10-02 00:00'</code>, and every partition is listed and scanned. <code>PartitionFilters</code> is empty.</p>
+      <h3>Why it happens</h3>
+      <p>Spark prunes partitions only from filters on the <b>partition column itself</b>. It doesn't know that <code>event_date</code> is derived from <code>event_ts</code>, so a filter on the timestamp can't skip any <code>event_date=…</code> folder. Pushdown on <code>event_ts</code> may still skip some row groups inside files, but every folder is opened.</p>
+      <h3>How to confirm</h3>
+      <ol><li><code>explain("formatted")</code>: <code>PartitionFilters</code> is empty while <code>PushedFilters</code> mentions <code>event_ts</code>.</li><li>SQL tab: number of files read equals the table's file count.</li></ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Add the partition filter explicitly: <code>event_date = '2026-10-01'</code> alongside the timestamp range.</li>
+        <li>On Delta, declare the partition column as a <b>generated column</b> (<code>GENERATED ALWAYS AS (CAST(event_ts AS DATE))</code>); Delta can then derive the partition filter from the timestamp filter automatically.</li>
+        <li>Document the partition column for table users, and make it the natural one to filter on.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Partition pruning only works when you filter on the partition column itself. If a table is partitioned by date and people filter on the timestamp, every partition is scanned. I add the date filter explicitly, or use Delta generated columns so the partition filter is derived automatically."</div>
+    </div>
+  </section>
+
+  <section id="wrong-join">
+    <h2>Wrong join strategy from bad size estimates</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>Either a tiny table is joined with a sort-merge join (two shuffles of a huge table), or a large table is broadcast and the job hits driver OOM or a broadcast timeout.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>Missing or stale statistics: Spark estimates a filtered table from its full file size, or thinks a table is small because it was analysed long ago.</li>
+        <li>Compressed file size isn't memory size: Parquet commonly expands several times when decoded.</li>
+        <li>The threshold was raised cluster-wide, or a <code>broadcast()</code> hint sits on a table that grew.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol><li>Compare the strategy in <code>explain()</code> with the final plan in the SQL tab (AQE may already have corrected it).</li><li>Check the real sizes of both join inputs in the SQL tab.</li><li><code>DESCRIBE EXTENDED</code> / <code>DESCRIBE DETAIL</code> to see the statistics Spark has.</li></ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Keep AQE on so it can switch to broadcast at runtime.</li>
+        <li>Refresh statistics after large loads (<code>ANALYZE TABLE … COMPUTE STATISTICS</code>).</li>
+        <li>Set the threshold per job to what your executors can hold, rather than raising it cluster-wide.</li>
+        <li>Remove broadcast hints from tables that aren't reliably small.</li>
+      </ul>
+      <p class="small muted">Broadcast memory failures in detail: <a href="../architecture/production.html#broadcast-oom">Module 1 · Broadcast too big</a>. Try scenarios in the <a href="examples.html#picker">join strategy picker</a>.</p>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Join choice depends on size estimates. With stale or missing statistics Spark can shuffle a tiny table or broadcast a huge one. I keep AQE on, refresh statistics after big loads, tune the threshold per job, and use hints only for tables I know stay small."</div>
+    </div>
+  </section>
+
+  <section id="cartesian">
+    <h2>Accidental cartesian join</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A join step outputs billions of rows, runs for hours or never finishes. The plan shows <code>CartesianProduct</code> or <code>BroadcastNestedLoopJoin</code>.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>The join condition is missing or wrong (joining on a column that is constant or NULL).</li>
+        <li>The condition is non-equi only (<code>a.ts BETWEEN b.start AND b.end</code>), so no hash or sort-merge join is possible.</li>
+        <li>An OR across columns (<code>a.id = b.id OR a.email = b.email</code>) can stop Spark from using an equi-join.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol><li>Look for <code>CartesianProduct</code> / <code>BroadcastNestedLoopJoin</code> in the plan.</li><li>SQL tab: rows output from the join node are far larger than either input.</li></ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Add the missing equality key. For range joins, add an equality "bucket" key too (for example join on the date, then filter the time range) so Spark can use a hash or sort-merge join.</li>
+        <li>Split OR joins into two equi-joins and union the results.</li>
+        <li>Make cross joins explicit with <code>crossJoin()</code> only when you really mean them.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"If a join explodes, I check the plan for a cartesian product or nested-loop join, which means there's no usable equality condition. I add an equality key, bucket range joins on something like the date first, and split OR conditions into separate equi-joins."</div>
+    </div>
+  </section>
+
+  <section id="aqe-off">
+    <h2>AQE isn't helping</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>You expected AQE to coalesce partitions or fix skew, but the job still has 200 tiny tasks or one huge straggler.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>AQE is disabled, or the platform version predates it being on by default (before Spark 3.2).</li>
+        <li>There's no shuffle in that part of the query; AQE only re-plans at shuffle boundaries.</li>
+        <li>The skew is in an aggregation or window, not a sort-merge join.</li>
+        <li>The skewed partition is below the thresholds (5 × median and 256 MB).</li>
+        <li>The problem is in the first scan stage, before any statistics exist.</li>
+      </ul>
+      <h3>Fix</h3>
+      <ul>
+        <li>Confirm <code>spark.sql.adaptive.enabled=true</code> and look for <code>AdaptiveSparkPlan</code> in the plan.</li>
+        <li>Tune the advisory partition size and skew thresholds for your data.</li>
+        <li>For skewed aggregations: salting or a two-step aggregation (<a href="../../spark-tuning.html#s-skew">Module 5 · Data skew</a>).</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"AQE only acts at shuffle boundaries, and its skew handling covers sort-merge joins. If it isn't helping, I check it's enabled, check the skew thresholds, and handle aggregation skew myself with salting."</div>
+    </div>
+  </section>
+
+  <section id="broadcast-timeout">
+    <h2>Broadcast timeout</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>Could not execute broadcast in 300 secs. You can increase the timeout for
+broadcasts via spark.sql.broadcastTimeout or disable broadcast join by setting
+spark.sql.autoBroadcastJoinThreshold to -1</code></pre>
+      <h3>Why it happens</h3>
+      <p>The side being broadcast is expensive to <b>compute</b> (a big upstream join or aggregation), or large to collect and send, so building the broadcast takes longer than 300 seconds.</p>
+      <h3>Fix</h3>
+      <ul>
+        <li>If the side is genuinely small but slow to compute, materialise it first (cache or write it), then broadcast the result; or raise <code>spark.sql.broadcastTimeout</code>.</li>
+        <li>If it's genuinely big, stop broadcasting it: remove the hint or lower the threshold.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A broadcast timeout means building the broadcast side took over five minutes, either because it's expensive to compute or too big. I materialise the small side first, or stop broadcasting it if it's actually large."</div>
+    </div>
+  </section>
+
+  <section id="regression">
+    <h2>Plan regressions after an upgrade or config change</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A stable job becomes much slower after a Spark/runtime upgrade, a config change, or a schema change, with no code change.</p>
+      <h3>Why it happens</h3>
+      <p>New versions change optimiser rules and defaults; a schema change can alter types or statistics; a config change (threshold, AQE settings) changes join or partition choices.</p>
+      <h3>How to confirm</h3>
+      <ol><li>Compare <code>explain("formatted")</code> output and the SQL-tab plans from before and after: join strategies, number of <code>Exchange</code>s, pushed filters.</li></ol>
+      <h3>Fix and prevent</h3>
+      <ul>
+        <li>Pin the problematic choice with a hint or a targeted config while investigating.</li>
+        <li>Keep a "golden" plan for critical jobs and diff it in testing before upgrades.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"When a job regresses without a code change, I diff the physical plans before and after. Usually a join strategy or a lost pushdown explains it. For critical jobs I keep reference plans and compare them when upgrading."</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2>Common interview questions</h2>
+    <div class="qa">
+      <details><summary>Explain the Catalyst optimiser.</summary><div>It turns a query into an unresolved logical plan, resolves it against the catalog (analysis), applies rule-based optimisations like predicate pushdown, column pruning and constant folding, picks physical operators such as join strategies using sizes and thresholds, then Tungsten generates compiled code for each stage.</div></details>
+      <details><summary>What is predicate pushdown?</summary><div>Passing filter conditions down to the data source so it can skip data before Spark reads it. With Parquet, the reader uses per-row-group min/max statistics to skip row groups that can't match.</div></details>
+      <details><summary>Partition pruning vs dynamic partition pruning?</summary><div>Static pruning uses filters on the partition column itself to skip folders at planning time. Dynamic pruning uses the filtered keys of another (dimension) table at runtime to prune the fact table's partitions in a join.</div></details>
+      <details><summary>How does Spark choose a join strategy?</summary><div>Hints first; then broadcast hash join if a buildable side is under the broadcast threshold; otherwise sort-merge join by default, or shuffle hash join when preferred and suitable. Non-equi joins use nested-loop strategies. AQE can switch to broadcast at runtime when a side turns out small.</div></details>
+      <details><summary>What is AQE and what does it optimise?</summary><div>Adaptive Query Execution re-plans between stages using real shuffle statistics: it coalesces small partitions, switches sort-merge joins to broadcast joins, and splits skewed partitions in sort-merge joins.</div></details>
+      <details><summary>Why would explain() show a different plan from what ran?</summary><div>With AQE on, explain() shows the initial plan. AQE can change join strategies and partition counts during execution; the SQL tab shows the final plan.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../../spark-tuning.html"><span>Next · Module 5</span><b>Performance tuning &amp; debugging</b></a>
+  </nav>
+</div></main>
+</body></html>

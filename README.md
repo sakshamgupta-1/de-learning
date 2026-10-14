@@ -23,7 +23,8 @@ The hub started as a personal prep tool and is now open to friends for review an
 | `spark-architecture.html` | Redirect to `spark/architecture/` |
 | `spark/execution/` | Spark Core module 3: overview, deep dive, examples (stepper, job counting) and production issues |
 | `spark-execution.html` | Redirect to `spark/execution/` |
-| `spark-optimizer.html` | Spark Core module 4: Catalyst, pushdown and pruning, explain(), joins, AQE, UDFs |
+| `spark/optimizer/` | Spark Core module 4: overview, deep dive (Catalyst stepper, pushdown simulator, AQE), examples (explain, join picker) and production issues |
+| `spark-optimizer.html` | Redirect to `spark/optimizer/` |
 | `spark-tuning.html` | Spark Core module 5: debug flow, six failure scenarios, shuffle, partition and executor sizing |
 | `styles.css` | Shared design tokens and components (light and dark themes) |
 | `scripts/check.py` | Automated checks run on every pull request |
