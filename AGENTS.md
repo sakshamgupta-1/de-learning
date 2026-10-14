@@ -74,11 +74,13 @@ Don't create stub or "coming soon" sub-pages. A simple topic may have only an ov
 
 Link a topic to the module overview by default. Link to a sub-page anchor (`spark/tuning/production.html#skew`) when the topic is mainly taught there.
 
+Always link to folders with an explicit `index.html` (`spark/architecture/index.html`, not `spark/architecture/`). Folder-only links fail when the site is opened from `file://`.
+
 ### Migrating the existing Spark Core pages
 
 The four `spark-*.html` pages at the repo root predate this structure; each one mixes overview and depth. Split them into `spark/<module>/` **one module per PR**. Until then, don't add new content in the old layout. When a page moves:
 
-- Leave a small redirect page at the old path (`<meta http-equiv="refresh" content="0; url=spark/architecture/">` plus a plain link) so bookmarks and shared links keep working.
+- Leave a small redirect page at the old path (`<meta http-equiv="refresh" content="0; url=spark/architecture/index.html">` plus a plain link) so bookmarks and shared links keep working.
 - Update every tracker link in `index.html` that pointed to the old page. Keep the `GROUPS` order unchanged.
 - Keep existing section ids where the content lands, so anchors still resolve.
 
@@ -114,7 +116,7 @@ The hub's progress is stored in each reader's browser under the localStorage key
 
 - **Only append** new topics to the end of a group. Inserting or reordering shifts ids and silently corrupts everyone's saved progress.
 - To retire a topic, rename it in place rather than deleting it.
-- Each topic entry is `[title, link, moduleKey, isOriginal]`. `link` is a path from the repo root, such as `spark/architecture/#memory`; use `0` when no page exists yet.
+- Each topic entry is `[title, link, moduleKey, isOriginal]`. `link` is a path from the repo root, such as `spark/architecture/index.html#memory`; use `0` when no page exists yet.
 - When a module page adds a `#mine` checklist, its indices must match the hub's `GROUPS` entries.
 - If you ever must change the scheme, bump the key to `-v2` and note it in the PR.
 

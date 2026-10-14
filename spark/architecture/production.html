@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Executor Memory Failures</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="index.html" aria-current="page">1 · Architecture</a>
+    <a href="../../spark-execution.html">2 · Execution</a>
+    <a href="../../spark-optimizer.html">3 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">4 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Architecture &amp; memory</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 1 · Production issues</p>
+  <h1>Executor memory: failures and fixes</h1>
+  <p class="lede">The memory failures you'll actually meet in production, and the ones interviewers love to ask about. Each one follows the same path: symptom, why, how to confirm, fix, prevention, and a short interview answer.</p>
+  <div class="toc">
+    <a href="#triage">Triage table</a><a href="#heap-oom">Heap OOM</a><a href="#container-killed">Container killed</a><a href="#driver-oom">Driver OOM</a><a href="#broadcast-oom">Broadcast too big</a><a href="#spill">Heavy spill</a><a href="#gc">GC &amp; lost executors</a><a href="#pandas-udf">Pandas UDF OOM</a><a href="#cache">Cache pressure</a><a href="#levers">Mitigation levers</a><a href="#interview">Interview questions</a>
+  </div>
+
+  <section id="triage">
+    <h2>Start here: read the error</h2>
+    <p>The first question is always <b>which memory ran out</b>. The error text tells you, and each region has different fixes. If you need a refresher on the regions, see the <a href="deep-dive.html#memory">memory diagram</a>.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>What you see</th><th>Memory that ran out</th><th>Go to</th></tr></thead>
+      <tbody>
+        <tr><td><code>OutOfMemoryError: Java heap space</code> or <code>GC overhead limit exceeded</code> in an executor log</td><td>Executor heap</td><td><a href="#heap-oom">Heap OOM</a></td></tr>
+        <tr><td><code>Container killed … exceeding memory limits</code>, <code>OOMKilled</code>, exit code 137</td><td>Executor overhead (off-heap, Python)</td><td><a href="#container-killed">Container killed</a></td></tr>
+        <tr><td>OOM in the driver log, or <code>bigger than spark.driver.maxResultSize</code></td><td>Driver heap</td><td><a href="#driver-oom">Driver OOM</a></td></tr>
+        <tr><td><code>Not enough memory to build and broadcast the table</code></td><td>Driver and executor heap, via a broadcast</td><td><a href="#broadcast-oom">Broadcast too big</a></td></tr>
+        <tr><td>No failure, but Spill (Memory / Disk) in the stage metrics</td><td>Execution memory per task</td><td><a href="#spill">Heavy spill</a></td></tr>
+        <tr><td><code>ExecutorLostFailure … heartbeat timed out</code>, high GC time</td><td>Heap under GC pressure (or the node died)</td><td><a href="#gc">GC &amp; lost executors</a></td></tr>
+        <tr><td><code>Python worker exited unexpectedly (crashed)</code> during <code>applyInPandas</code></td><td>Python worker memory</td><td><a href="#pandas-udf">Pandas UDF OOM</a></td></tr>
+        <tr><td>Joins got slower after adding <code>.cache()</code></td><td>Storage crowding out execution</td><td><a href="#cache">Cache pressure</a></td></tr>
+      </tbody></table></div>
+    <div class="callout say"><div class="lbl">The universal first answer</div>"I start with the exact error to tell driver from executor, and heap from container-killed. Then I check whether all tasks fail or only a few: a few means skew, all means partitions are too big for the memory each task gets. Only then do I change memory settings."</div>
+  </section>
+
+  <section id="heap-oom">
+    <h2>Executor heap OOM</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>java.lang.OutOfMemoryError: Java heap space
+java.lang.OutOfMemoryError: GC overhead limit exceeded
+Job aborted due to stage failure: Task 37 in stage 4.0 failed 4 times</code></pre>
+      <p>Executors die, the stage retries, and after four failed attempts the job aborts.</p>
+      <h3>Why it happens</h3>
+      <p>One task needs more heap than its share (about pool ÷ cores) for something that can't spill:</p>
+      <ul>
+        <li>Partitions far too large, for example 500 GB through the default 200 shuffle partitions is about 2.5 GB each.</li>
+        <li>A skewed key sends most rows to one task.</li>
+        <li>Unbounded groups: <code>collect_list</code>, <code>collect_set</code> or <code>groupByKey</code> on a key with millions of rows.</li>
+        <li><code>explode</code> or a many-to-many join multiplying rows unexpectedly.</li>
+        <li>Very wide rows: large strings, JSON blobs, binary columns.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Stages tab → failed tasks → read the error column.</li>
+        <li><b>Only a few tasks fail?</b> Compare max vs median Shuffle Read Size: that's skew.</li>
+        <li><b>All tasks fail?</b> Divide shuffle read by task count. Over ~1 GB per task means partitions are too big.</li>
+        <li>SQL tab: look for a sudden jump in rows output after an <code>explode</code> or join.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Smaller partitions: raise <code>spark.sql.shuffle.partitions</code>, or lower AQE's advisory size and let it split.</li>
+        <li>Fix skew: AQE skew join, broadcast the small side, salt the hot key, filter NULL keys.</li>
+        <li>More memory per task: fewer cores per executor, or more executor memory.</li>
+        <li>Replace unbounded <code>collect_list</code> with a real aggregation, or cap it.</li>
+        <li>Drop unneeded wide columns before the shuffle.</li>
+      </ul>
+<pre><code>spark.conf.set("spark.sql.shuffle.partitions", 2000)              <span class="muted"># ~250 MB each for 500 GB</span>
+spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128m")
+<span class="muted"># at cluster launch, if all else is tuned:</span>
+<span class="muted"># spark.executor.cores=4   spark.executor.memory=24g</span></code></pre>
+      <h3>Prevent</h3>
+      <ul><li>Aim for 128–200 MB per shuffle partition; keep AQE on; watch max-vs-median task metrics on large jobs.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Heap OOM means one task needed more than its share of executor memory for data that can't spill. If only a few tasks fail I treat it as skew; if all fail, partitions are too big. I fix the data distribution first, with more partitions or skew handling, and only then add memory or reduce cores per executor."</div>
+    </div>
+  </section>
+
+  <section id="container-killed">
+    <h2>Container killed: overhead exceeded</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>Container killed by YARN for exceeding memory limits.
+18.1 GB of 18 GB physical memory used.
+Consider boosting spark.executor.memoryOverhead.
+
+# Kubernetes: executor pod status OOMKilled, exit code 137</code></pre>
+      <p>The executor disappears with <b>no</b> <code>OutOfMemoryError</code> in its own log. The heap was fine; the process as a whole went over the container limit, so the cluster manager killed it.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li><b>Python workers</b> for PySpark UDFs and pandas UDFs, one per running task, each with its own memory.</li>
+        <li><b>Arrow buffers</b> moving data between the JVM and Python.</li>
+        <li><b>Native and off-heap memory</b>: Netty shuffle buffers, compression libraries, Parquet/ORC readers.</li>
+        <li>Overhead left at the default 10%, which is sized for JVM-only jobs.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>The message comes from YARN or Kubernetes, not from the JVM.</li>
+        <li>Executors tab: peak JVM heap used is well below <code>spark.executor.memory</code>.</li>
+        <li>The failing stage runs Python UDFs, <code>applyInPandas</code> or very large shuffles.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Raise <code>spark.executor.memoryOverhead</code>, often to 15–25% of heap for PySpark-heavy jobs.</li>
+        <li>Set <code>spark.executor.pyspark.memory</code> to give Python workers an explicit budget, added to the container.</li>
+        <li>Fewer cores per executor means fewer Python workers running at once.</li>
+        <li>Replace Python UDFs with built-in functions; use pandas UDFs over plain Python UDFs.</li>
+        <li>Smaller Arrow batches: <code>spark.sql.execution.arrow.maxRecordsPerBatch</code> (10,000 by default).</li>
+      </ul>
+<pre><code>spark.executor.memory=16g
+spark.executor.memoryOverhead=4g        <span class="muted"># instead of the default 1.6g</span>
+spark.executor.pyspark.memory=2g        <span class="muted"># optional explicit Python budget</span></code></pre>
+      <h3>Prevent</h3>
+      <ul><li>Size overhead by workload type (JVM-only vs PySpark-heavy); prefer built-ins; keep a PySpark cluster profile with higher overhead.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Container killed means the heap was fine but total process memory went over the container limit, usually Python workers or off-heap buffers. Adding heap makes it worse on a fixed node. I raise memoryOverhead or set pyspark.memory, reduce cores so fewer Python workers run at once, and move logic from Python UDFs to built-ins."</div>
+    </div>
+  </section>
+
+  <section id="driver-oom">
+    <h2>Driver OOM</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>java.lang.OutOfMemoryError: Java heap space        (in the driver log)
+Total size of serialized results of 412 tasks (1024.0 MiB)
+is bigger than spark.driver.maxResultSize (1024.0 MiB)</code></pre>
+      <p>The whole application dies, or a notebook detaches. Executors were healthy.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li><code>collect()</code>, <code>toPandas()</code> or <code>take(n)</code> with a large n on big data.</li>
+        <li>Building a broadcast: by default the driver collects the small side first.</li>
+        <li>Planning over hundreds of thousands of files or partitions.</li>
+        <li>Very long query plans built in loops (each iteration extends the lineage).</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Find the last action in the driver log before the crash.</li>
+        <li>Look for <code>collect</code> / <code>toPandas</code> / <code>broadcast()</code> on large data in that code path.</li>
+        <li>Check file counts on the input tables.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Write results to a table or files instead of collecting; use <code>limit()</code> for samples.</li>
+        <li>Lower the broadcast threshold or remove a broadcast hint on a large table.</li>
+        <li>Compact small files; in loops, write intermediate results or <code>checkpoint()</code> to cut lineage.</li>
+        <li>Only then: raise <code>spark.driver.memory</code> and <code>spark.driver.maxResultSize</code> (default 1g).</li>
+      </ul>
+<pre><code><span class="muted"># instead of</span>
+pdf = big_df.toPandas()
+<span class="muted"># do</span>
+big_df.write.mode("overwrite").saveAsTable("tmp.result")
+sample = big_df.limit(1000).toPandas()</code></pre>
+      <h3>Prevent</h3>
+      <ul><li>Code-review rule: no <code>collect</code> or <code>toPandas</code> on unbounded data.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Driver OOM almost always means data was pulled to the driver with collect or toPandas, a broadcast was too big, or planning hit too many files. I fix the cause, writing results out instead of collecting, and only raise driver memory as a last resort."</div>
+    </div>
+  </section>
+
+  <section id="broadcast-oom">
+    <h2>Broadcast too big</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>Not enough memory to build and broadcast the table to all worker nodes.
+As a workaround, you can either disable broadcast by setting
+spark.sql.autoBroadcastJoinThreshold to -1 or increase the spark driver memory
+by setting spark.driver.memory to a higher value.
+
+Could not execute broadcast in 300 secs.
+Cannot broadcast the table that is larger than 8GB.</code></pre>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>The threshold was raised too high, or a <code>broadcast()</code> hint was put on a table that grew.</li>
+        <li>Wrong size estimates: missing or stale statistics make a large table look small.</li>
+        <li><b>On-disk size isn't memory size.</b> Compressed Parquet often expands 5–10× in memory, so a 300 MB table can need 2–3 GB.</li>
+        <li>Every executor holds a full copy, so a big broadcast also squeezes executor memory.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li><code>explain()</code> shows <code>BroadcastExchange</code> on the table you expected to be large.</li>
+        <li>SQL tab: the broadcast node's data size and build time.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Lower <code>spark.sql.autoBroadcastJoinThreshold</code> or remove the hint; let sort-merge join handle it.</li>
+        <li>Refresh statistics: <code>ANALYZE TABLE … COMPUTE STATISTICS</code>.</li>
+        <li>Rely on AQE to choose at runtime, using real sizes after filters.</li>
+        <li>If it's slow rather than too big, raise <code>spark.sql.broadcastTimeout</code> (300 s).</li>
+      </ul>
+      <h3>Prevent</h3>
+      <ul><li>Keep broadcasts to a few hundred MB <i>in memory</i>; don't blanket-raise the threshold cluster-wide.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Broadcasts are collected on the driver and copied to every executor, and compressed files expand several times in memory. If a broadcast fails I check the real in-memory size, fix stale statistics, lower the threshold or drop the hint, and let AQE decide at runtime."</div>
+    </div>
+  </section>
+
+  <section id="spill">
+    <h2>Heavy spill (slow, but no failure)</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>The stage is slow. Its metrics show <b>Spill (Memory)</b> and <b>Spill (Disk)</b>, often several times the shuffle read size.</p>
+      <h3>Why it happens</h3>
+      <p>A sort, join or aggregation needed more execution memory than its task had, so Spark wrote sorted runs to local disk and merged them later. Spill (Memory) is the in-memory size of what was spilled; Spill (Disk) is its serialized size on disk.</p>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Shuffle read ÷ tasks gives data per task. Far above 200 MB means partitions are too big.</li>
+        <li>Spill spread evenly across tasks means partitions are too big; spill in a few tasks means skew.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>More shuffle partitions, or a smaller AQE advisory size.</li>
+        <li>Fewer cores per executor, or memory-optimised instances.</li>
+        <li>Select fewer columns before the shuffle; aggregate before exploding.</li>
+        <li>Fast local disks (NVMe) for shuffle-heavy clusters.</li>
+      </ul>
+      <p class="small muted">The full walkthrough with example metrics is in Module 4: <a href="../../spark-tuning.html#s-spill">Disk spill scenario →</a></p>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Spill means a task's sort or aggregation didn't fit in its execution memory, so it used local disk. A little is fine. If it's large and even across tasks I add partitions or give each task more memory with fewer cores; if it's concentrated in a few tasks, it's skew."</div>
+    </div>
+  </section>
+
+  <section id="gc">
+    <h2>Long GC pauses and lost executors</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>ExecutorLostFailure (executor 7 exited caused by one of the running tasks)
+Reason: Executor heartbeat timed out after 120000 ms</code></pre>
+      <p>Tasks are slow and erratic; GC time in the Executors tab is a large share of task time (over about 10% is a warning).</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>Very large heaps full of objects cause long stop-the-world collections, and the executor misses its heartbeats.</li>
+        <li>Many cores sharing one heap create objects faster than GC clears them.</li>
+        <li>Caching large deserialized datasets fills the heap with long-lived objects.</li>
+        <li>Sometimes the node really is gone, for example a spot instance reclaimed.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Executors tab: GC time against task time.</li>
+        <li>Executor logs: GC log lines around the timeout.</li>
+        <li>Cloud console: was the node pre-empted or terminated?</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Smaller executors: around 4–5 cores and a moderate heap (often 16–32 GB) rather than one giant executor per node.</li>
+        <li>Cache less, or cache serialized (<code>MEMORY_AND_DISK_SER</code>), and unpersist when done.</li>
+        <li>Fix skew so no single task builds huge in-memory structures.</li>
+        <li>Raise <code>spark.network.timeout</code> only as a stopgap; it hides the problem.</li>
+        <li>For spot loss: graceful decommissioning (<a href="deep-dive.html#dynamic">deep dive</a>) and mixed on-demand/spot pools.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A heartbeat timeout with high GC time means the executor was stuck in garbage collection. I'd move to smaller executors with fewer cores, cache less or cache serialized, and fix any skew, rather than just raising the network timeout."</div>
+    </div>
+  </section>
+
+  <section id="pandas-udf">
+    <h2>Pandas UDF and applyInPandas OOM</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>org.apache.spark.SparkException: Python worker exited unexpectedly (crashed)
+# or the container is killed while a groupBy().applyInPandas() stage runs</code></pre>
+      <h3>Why it happens</h3>
+      <p><code>groupBy().applyInPandas()</code> loads <b>all rows of one group</b> into the Python worker as a single pandas DataFrame before calling your function. One huge group, often a skewed key, exhausts Python memory. pandas operations also make copies, so peak memory can be several times the data size.</p>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Count rows per group key: <code>df.groupBy("key").count().orderBy(F.desc("count"))</code>.</li>
+        <li>The failure happens in the stage running the pandas function, and the largest group dwarfs the median.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Make groups smaller: group by a finer key, or salt the key and combine the results.</li>
+        <li>Select only the columns the function needs, before the group.</li>
+        <li>Use built-in aggregations where possible; use <code>mapInPandas</code> for streaming over batches when you don't need whole groups.</li>
+        <li>Give Python more room: <code>spark.executor.pyspark.memory</code>, more overhead, fewer cores.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"applyInPandas materialises each whole group in one Python worker, so skewed groups cause OOM. I check group sizes, split or salt large groups, pass only needed columns, and give Python workers an explicit memory budget."</div>
+    </div>
+  </section>
+
+  <section id="cache">
+    <h2>Cache pressure</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>After adding <code>.cache()</code>, joins get slower and spill more. The Storage tab shows a <i>Fraction Cached</i> below 100%, and parts of the cached data are recomputed anyway.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>Cache lives in the same unified pool as execution. Up to half the pool is protected for cache, so execution has less room.</li>
+        <li>With MEMORY_ONLY, partitions that don't fit are dropped and recomputed from lineage each time they're used.</li>
+        <li>Cached data that's never unpersisted keeps holding memory for the rest of the application.</li>
+      </ul>
+      <h3>Fix</h3>
+      <ul>
+        <li>Cache only DataFrames that are reused by several actions <b>and</b> expensive to recompute.</li>
+        <li>Cache after filtering and selecting columns, not the raw input.</li>
+        <li>Use <code>MEMORY_AND_DISK</code> (the DataFrame default) and call <code>unpersist()</code> when done.</li>
+        <li>For long pipelines, write an intermediate table instead of caching.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Caching isn't free: it shares the unified pool with execution, so a large cache can make joins spill. I cache only reused, expensive DataFrames, after trimming them, and unpersist as soon as they're no longer needed."</div>
+    </div>
+  </section>
+
+  <section id="levers">
+    <h2>Mitigation levers, cheat sheet</h2>
+    <p>Roughly in the order to try them. Fixing the data distribution comes before buying memory.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Lever</th><th>What it changes</th><th>Use when</th><th>Cost or risk</th></tr></thead>
+      <tbody>
+        <tr><td>Fix skew (AQE skew join, broadcast, salting, filter NULL keys)</td><td>Spreads hot keys across tasks</td><td>A few tasks fail, spill or run long</td><td>Salting adds code complexity</td></tr>
+        <tr><td>More shuffle partitions / smaller AQE advisory size</td><td>Less data per task</td><td>Heap OOM or spill on all tasks</td><td>Too many tiny tasks and small files if overdone</td></tr>
+        <tr><td>Fewer cores per executor</td><td>More memory per task</td><td>Spill or OOM on fixed hardware</td><td>Less parallelism per executor</td></tr>
+        <tr><td>Trim data early (select, filter, pre-aggregate)</td><td>Smaller rows and fewer of them</td><td>Always worth checking</td><td>None</td></tr>
+        <tr><td>More <code>memoryOverhead</code> / <code>pyspark.memory</code></td><td>Off-heap and Python headroom</td><td>Container killed, PySpark jobs</td><td>Less left for heap on a fixed node</td></tr>
+        <tr><td>More executor memory</td><td>Bigger pool for every task</td><td>Data is well distributed and still doesn't fit</td><td>Cost; very large heaps mean longer GC pauses</td></tr>
+        <tr><td>Avoid collect/toPandas; smaller broadcasts</td><td>Driver memory</td><td>Driver OOM</td><td>None</td></tr>
+        <tr><td>Memory-optimised instances</td><td>More memory per core</td><td>Consistently memory-bound workloads</td><td>Higher cost per core</td></tr>
+        <tr><td>Change <code>spark.memory.fraction</code></td><td>Pool vs user memory split</td><td>Rarely: heavy UDF objects in user memory</td><td>Easy to make things worse; last resort</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="interview">
+    <h2>Common interview questions</h2>
+    <div class="qa">
+      <details><summary>How do you troubleshoot an OOM in Spark?</summary><div>Read the exact error: driver or executor, heap or container-killed. For executors, check if all tasks fail (partitions too big) or a few (skew), using max vs median shuffle read. Fix the data distribution first: more partitions, skew handling, trimming columns. Then adjust memory per task: fewer cores, more memory, or more overhead for PySpark. Re-run and confirm in the stage metrics.</div></details>
+      <details><summary>What's the difference between "Java heap space" and "Container killed by YARN"?</summary><div>Java heap space: the JVM heap (spark.executor.memory) ran out, so the JVM threw OutOfMemoryError. Container killed: the heap may be fine, but total process memory (heap + overhead: Python, off-heap, native) exceeded the container limit, so YARN or Kubernetes killed the process. The first needs smaller partitions or more heap; the second needs more overhead or less Python memory.</div></details>
+      <details><summary>Your job OOMs. Would you just increase executor memory?</summary><div>Not first. If the cause is skew, the hot task will still fail or barely fit. If it's container-killed, more heap makes it worse on a fixed node. I'd find the cause first and fix the distribution, and add memory only when the data is well spread and still doesn't fit. It's also the most expensive option.</div></details>
+      <details><summary>Why can reducing cores per executor fix an OOM?</summary><div>The unified pool is shared by the tasks running at once, one per core. Going from 8 to 4 cores doubles the memory each task can use, with no extra RAM. The cost is fewer parallel tasks per executor.</div></details>
+      <details><summary>What uses executor memoryOverhead?</summary><div>Everything outside the JVM heap: JVM metaspace and thread stacks, Netty network buffers for shuffle, native libraries such as compression codecs, and Python worker processes for PySpark (unless spark.executor.pyspark.memory is set). Default is max(384 MB, 10% of executor memory).</div></details>
+      <details><summary>What's spark.memory.fraction, and should you tune it?</summary><div>The share of (heap − 300 MB) used for the unified execution + storage pool, 0.6 by default; the rest is user memory. Rarely tune it. Lower it only if user code keeps large objects in memory; raising it leaves less room for those objects. Partitions, cores and skew are better levers.</div></details>
+      <details><summary>What happens when execution memory runs out, and when storage memory runs out?</summary><div>Execution first borrows free storage memory and evicts cache down to the protected half; if it still needs more, it spills to disk. Storage can only use free memory, so new cached blocks are dropped (MEMORY_ONLY, recomputed later) or written to disk (MEMORY_AND_DISK).</div></details>
+      <details><summary>A broadcast join fails with "Not enough memory to build and broadcast the table". Options?</summary><div>Check the real in-memory size (compressed files expand). Remove the hint or lower autoBroadcastJoinThreshold so Spark uses a sort-merge join; refresh table statistics; rely on AQE to decide at runtime. Increasing driver memory works only if the table genuinely should be broadcast.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="../../spark-execution.html"><span>Next · Module 2</span><b>Execution flow &amp; lazy evaluation</b></a>
+  </nav>
+</div></main>
+</body></html>

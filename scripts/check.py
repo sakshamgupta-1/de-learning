@@ -64,9 +64,10 @@ for page, html in texts.items():
                 msg = res.stderr.strip().splitlines()[-1] if res.stderr.strip() else "syntax error"
                 errors.append(f"{page}: inline script #{i + 1}: {msg}")
 
-    # 2. links: static hrefs, plus "page.html#id" / "folder/#id" strings inside scripts
+    # 2. links: static hrefs, plus "page.html#id" strings inside scripts
+    #    (strings joined to a prefix with + are built at runtime and skipped)
     targets = set(re.findall(r'href="([^"]+)"', html))
-    targets |= set(re.findall(r'["\']((?:\.\./|[a-z0-9-]+/)*[a-z0-9-]+\.html(?:#[A-Za-z0-9_.~-]+)?)["\']', html))
+    targets |= set(re.findall(r'(?<!\+)["\']((?:\.\./|[a-z0-9-]+/)*[a-z0-9-]+\.html(?:#[A-Za-z0-9_.~-]+)?)["\']', html))
     for href in targets:
         if re.match(r"^(https?:|mailto:|tel:|data:|javascript:)", href) or "${" in href:
             continue

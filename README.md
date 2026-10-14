@@ -16,7 +16,9 @@ The hub started as a personal prep tool and is now open to friends for review an
 | Path | What it is |
 | --- | --- |
 | `index.html` | Hub: topic tracker and list of learning paths |
-| `spark-architecture.html` | Spark Core module 1: driver, executors, jobs/stages/tasks, memory model, dynamic allocation |
+| `spark/index.html` | Spark Core path: list of modules |
+| `spark/architecture/` | Spark Core module 1: overview, deep dive (memory internals, dynamic allocation, speculation) and production memory failures |
+| `spark-architecture.html` | Redirect to `spark/architecture/` |
 | `spark-execution.html` | Spark Core module 2: spark-submit flow, lazy evaluation, narrow vs wide, stages |
 | `spark-optimizer.html` | Spark Core module 3: Catalyst, pushdown and pruning, explain(), joins, AQE, UDFs |
 | `spark-tuning.html` | Spark Core module 4: debug flow, six failure scenarios, shuffle, partition and executor sizing |
