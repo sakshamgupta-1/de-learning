@@ -22,6 +22,7 @@
   <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">RDD, DataFrame, Dataset &amp; pandas</span></nav>
   <nav class="mtabs" aria-label="Module pages">
     <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
     <a href="examples.html">Examples</a>
     <a href="production.html">Production issues</a>
   </nav>
@@ -121,7 +122,7 @@
     <ul>
       <li><b>Spark can see what you mean.</b> With <code>filter(col("country") == "AE")</code> Catalyst knows the column and the condition, so it can push the filter into the Parquet reader and read only the columns you use. An RDD <code>lambda</code> is a black box: Spark must read every row and every column and hand them to your function.</li>
       <li><b>Compact memory format.</b> Tungsten stores DataFrame rows as packed binary data, not one JVM object per row, which means less memory, less garbage collection and generated code that runs close to the CPU.</li>
-      <li><b>In PySpark the gap is largest.</b> DataFrame operations run entirely inside the JVM. RDD lambdas written in Python force every row to be serialised (pickled), sent to a Python worker process, processed, and sent back.</li>
+      <li><b>In PySpark the gap is largest.</b> DataFrame operations run entirely inside the JVM. RDD lambdas written in Python force every row to be serialised (pickled), sent to a Python worker process, processed, and sent back. <a href="deep-dive.html#boundary">See it animated →</a></li>
     </ul>
     <p>Spark SQL and the DataFrame API compile to the same plan, so they perform the same. The choice between them is style, not speed.</p>
   </section>
@@ -170,6 +171,10 @@
   <section id="deeper">
     <h2>Go deeper</h2>
     <div class="paths">
+      <a class="mod" href="deep-dive.html">
+        <span class="n">Deep dive</span><b>Arrow and vectorised execution</b>
+        <p>Row vs columnar memory, what Apache Arrow does at the JVM ↔ Python boundary, why pandas UDFs are faster, and the three meanings of "vectorised". Two interactive diagrams.</p>
+      </a>
       <a class="mod" href="examples.html">
         <span class="n">Examples</span><b>One query, six ways</b>
         <p>The same aggregation in RDD, DataFrame, SQL, Scala Dataset, pandas and the pandas API on Spark, with what Spark can and can't optimise in each, plus every conversion between them.</p>

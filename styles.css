@@ -255,3 +255,13 @@ pre.err{background:var(--bad-soft);border-color:transparent;color:var(--fg);whit
 .issue h3{margin-top:1.1rem}
 .issue h3:first-child{margin-top:0}
 .issue .callout{margin-bottom:0}
+
+/* interactive simulations (Arrow deep dive) */
+svg .hit{stroke:var(--fg);stroke-width:3}
+svg .flash{stroke-width:4}
+svg .dotA{fill:var(--accent)}
+.sim-ctrl{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:.8rem}
+.sim-ctrl .small{color:var(--muted)}
+.out.lanes{grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr))}
+.out .lane-a b{color:var(--accent)}
+.out .lane-b b{color:var(--ok)}

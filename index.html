@@ -23,10 +23,10 @@
   <div class="wide">
     <p class="eyebrow">Interview prep library</p>
     <h1>Data engineering topics, one place</h1>
-    <p class="lede">Your original 12 questions merged with the extended list into 78 topics across seven areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
+    <p class="lede">Your original 12 questions merged with the extended list into 79 topics across seven areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
 
     <div class="summary">
-      <div><div class="big" id="pct">0<small>/78</small></div><div class="muted small">topics done</div></div>
+      <div><div class="big" id="pct">0<small>/79</small></div><div class="muted small">topics done</div></div>
       <div class="sectbars" id="sectbars"></div>
     </div>
 
@@ -87,7 +87,7 @@
 </main>
 
 <script>
-const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark-optimizer.html",T="spark-tuning.html";
+const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark-optimizer.html",T="spark-tuning.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
@@ -116,7 +116,8 @@ const GROUPS=[
   ["Cache vs persist and storage levels",T+"#cache","tune"],
   ["Hadoop & MapReduce basics, and what Spark improved",M+"#spark","mr"],
   ["RDD vs DataFrame vs Dataset vs pandas DataFrame",R+"#compare","abs"],
-  ["toPandas, Arrow and the pandas API on Spark",P+"#topandas","abs"]]},
+  ["toPandas, Arrow and the pandas API on Spark",P+"#topandas","abs"],
+  ["Apache Arrow and vectorised execution (pandas UDFs)",V+"#arrow","abs"]]},
  {id:"stream",name:"Structured Streaming",items:[
   ["Different output modes in Structured Streaming",0,0,1],
   ["How to handle late data in Structured Streaming",0,0,1],

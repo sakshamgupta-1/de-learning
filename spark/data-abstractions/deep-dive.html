@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Arrow and Vectorised Execution</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="index.html" aria-current="page">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">RDD, DataFrame, Dataset &amp; pandas</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 2 · Deep dive</p>
+  <h1>Arrow and vectorised execution</h1>
+  <p class="lede">Why pandas UDFs are so much faster than plain Python UDFs, what Apache Arrow actually does, and the three different things people mean by "vectorised" in Spark.</p>
+  <div class="toc">
+    <a href="#layout">Row vs columnar</a><a href="#arrow">What Arrow is</a><a href="#boundary">Crossing JVM ↔ Python</a><a href="#vectorised">What "vectorised" means</a><a href="#where">Where Spark uses Arrow</a><a href="#configs">Configs</a><a href="#three-meanings">Three meanings of "vectorised"</a><a href="#say">Interview answers</a><a href="#check">Quick check</a>
+  </div>
+
+  <section id="layout">
+    <h2>Row layout vs columnar layout</h2>
+    <p>The same three-row table can sit in memory two ways. <b>Row layout</b> keeps each record together, which suits reading or writing whole records. <b>Columnar layout</b> keeps each column together, which suits analytics: most queries touch a few columns of many rows.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 250" role="img" aria-labelledby="lyT">
+  <title id="lyT">The same three rows stored record by record, and column by column</title>
+  <text class="tb" x="20" y="40">Row layout</text><text class="ts" x="118" y="40">one record after another · Spark's internal rows, pickled Python rows</text>
+  <text class="tb" x="20" y="150">Columnar layout</text><text class="ts" x="160" y="150">one column after another · Arrow, pandas, Parquet</text>
+  <rect class="bx2" id="rl-0-0" x="20" y="52" width="84" height="40" rx="4"/><text class="tm" x="62.0" y="77" text-anchor="middle" style="fill:var(--fg)">1</text><rect class="bxb" id="rl-0-1" x="106" y="52" width="84" height="40" rx="4"/><text class="tm" x="148.0" y="77" text-anchor="middle" style="fill:var(--fg)">Gold</text><rect class="bxa" id="rl-0-2" x="192" y="52" width="84" height="40" rx="4"/><text class="tm" x="234.0" y="77" text-anchor="middle" style="fill:var(--fg)">120</text><rect class="bx2" id="rl-1-0" x="292" y="52" width="84" height="40" rx="4"/><text class="tm" x="334.0" y="77" text-anchor="middle" style="fill:var(--fg)">2</text><rect class="bxb" id="rl-1-1" x="378" y="52" width="84" height="40" rx="4"/><text class="tm" x="420.0" y="77" text-anchor="middle" style="fill:var(--fg)">Silver</text><rect class="bxa" id="rl-1-2" x="464" y="52" width="84" height="40" rx="4"/><text class="tm" x="506.0" y="77" text-anchor="middle" style="fill:var(--fg)">80</text><rect class="bx2" id="rl-2-0" x="564" y="52" width="84" height="40" rx="4"/><text class="tm" x="606.0" y="77" text-anchor="middle" style="fill:var(--fg)">3</text><rect class="bxb" id="rl-2-1" x="650" y="52" width="84" height="40" rx="4"/><text class="tm" x="692.0" y="77" text-anchor="middle" style="fill:var(--fg)">Gold</text><rect class="bxa" id="rl-2-2" x="736" y="52" width="84" height="40" rx="4"/><text class="tm" x="778.0" y="77" text-anchor="middle" style="fill:var(--fg)">300</text><rect class="bx2" id="cl-0-0" x="20" y="162" width="84" height="40" rx="4"/><text class="tm" x="62.0" y="187" text-anchor="middle" style="fill:var(--fg)">1</text><rect class="bx2" id="cl-1-0" x="106" y="162" width="84" height="40" rx="4"/><text class="tm" x="148.0" y="187" text-anchor="middle" style="fill:var(--fg)">2</text><rect class="bx2" id="cl-2-0" x="192" y="162" width="84" height="40" rx="4"/><text class="tm" x="234.0" y="187" text-anchor="middle" style="fill:var(--fg)">3</text><rect class="bxb" id="cl-0-1" x="292" y="162" width="84" height="40" rx="4"/><text class="tm" x="334.0" y="187" text-anchor="middle" style="fill:var(--fg)">Gold</text><rect class="bxb" id="cl-1-1" x="378" y="162" width="84" height="40" rx="4"/><text class="tm" x="420.0" y="187" text-anchor="middle" style="fill:var(--fg)">Silver</text><rect class="bxb" id="cl-2-1" x="464" y="162" width="84" height="40" rx="4"/><text class="tm" x="506.0" y="187" text-anchor="middle" style="fill:var(--fg)">Gold</text><rect class="bxa" id="cl-0-2" x="564" y="162" width="84" height="40" rx="4"/><text class="tm" x="606.0" y="187" text-anchor="middle" style="fill:var(--fg)">120</text><rect class="bxa" id="cl-1-2" x="650" y="162" width="84" height="40" rx="4"/><text class="tm" x="692.0" y="187" text-anchor="middle" style="fill:var(--fg)">80</text><rect class="bxa" id="cl-2-2" x="736" y="162" width="84" height="40" rx="4"/><text class="tm" x="778.0" y="187" text-anchor="middle" style="fill:var(--fg)">300</text>
+  <rect class="bx2" x="20" y="224" width="14" height="14" rx="3"/><text class="ts" x="40" y="236">cust_id</text><rect class="bxb" x="130" y="224" width="14" height="14" rx="3"/><text class="ts" x="150" y="236">segment</text><rect class="bxa" x="240" y="224" width="14" height="14" rx="3"/><text class="ts" x="260" y="236">amount</text>
+</svg>
+<div class="sim-ctrl">
+  <button class="btn" id="scanBtn">Run sum(amount)</button>
+  <span class="small" id="scanOut">Highlights the values each layout has to read to add up <code>amount</code>.</span>
+</div>
+</div></div>
+
+<div class="wrap">
+  <ul>
+    <li><b>Fewer bytes read:</b> a query on <code>amount</code> touches only the <code>amount</code> block.</li>
+    <li><b>CPU-friendly:</b> values of one type sit next to each other, so the CPU cache is used well and one instruction can process several values at once.</li>
+    <li><b>Better compression:</b> similar values side by side compress well. That's why Parquet and ORC files are columnar.</li>
+  </ul>
+
+  <section id="arrow">
+    <h2>What Apache Arrow is</h2>
+    <p><b>Apache Arrow</b> is a standard <b>columnar format for data in memory</b>, defined the same way for every language. A batch of Arrow data (a <i>record batch</i>) is a set of column buffers plus a schema. Because Java, Python, C++ and others all understand the same layout, they can hand data to each other <b>without converting it value by value</b>, often without copying it at all.</p>
+    <p>Parquet is columnar <i>on disk</i>; Arrow is columnar <i>in memory</i>. pandas and NumPy are columnar in memory too, which is why converting Arrow to pandas is cheap.</p>
+  </section>
+
+  <section id="boundary">
+    <h2>Crossing the JVM ↔ Python boundary</h2>
+    <p>Spark's engine runs in the JVM; your Python function runs in separate <b>Python worker processes</b> on each executor. Every Python UDF means moving data across that process boundary and back. How it's moved makes the difference.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 290" role="img" aria-labelledby="bdT">
+  <title id="bdT">Race: a plain Python UDF sends rows one at a time to the Python worker, a pandas UDF sends whole Arrow batches</title>
+  <text class="tb" x="20" y="34">Plain Python UDF</text>
+  <text class="ts" x="450" y="56" text-anchor="middle">pickle → send → call f(row) → send back, for every row</text>
+  <rect class="bx2" x="20" y="66" width="170" height="64" rx="8"/><text class="tb" x="105" y="94" text-anchor="middle">Executor JVM</text><text class="ts" x="105" y="114" text-anchor="middle">Tungsten rows</text>
+  <line class="ln dash" x1="190" y1="98" x2="710" y2="98"/>
+  <rect class="bxb" id="pyA" x="710" y="66" width="170" height="64" rx="8"/><text class="tb" x="795" y="94" text-anchor="middle">Python worker</text><text class="tm" x="795" y="114" text-anchor="middle">f(row)</text>
+  <g id="dotsA"></g>
+
+  <text class="tb" x="20" y="174">pandas UDF (Arrow)</text>
+  <text class="ts" x="450" y="196" text-anchor="middle">one Arrow batch (~10,000 rows; 250 here) → call f(series) once</text>
+  <rect class="bx2" x="20" y="206" width="170" height="64" rx="8"/><text class="tb" x="105" y="234" text-anchor="middle">Executor JVM</text><text class="ts" x="105" y="254" text-anchor="middle">Tungsten rows</text>
+  <line class="ln dash" x1="190" y1="238" x2="710" y2="238"/>
+  <rect class="bxb" id="pyB" x="710" y="206" width="170" height="64" rx="8"/><text class="tb" x="795" y="234" text-anchor="middle">Python worker</text><text class="tm" x="795" y="254" text-anchor="middle">f(series)</text>
+  <g id="batchesB"></g>
+</svg>
+<div class="sim-ctrl">
+  <button class="btn" id="raceBtn">Play</button>
+  <button class="btn ghost" id="raceReset">Reset</button>
+  <span class="small">1,000 rows. Timing is illustrative, not a benchmark.</span>
+</div>
+<div class="out lanes" aria-live="polite">
+  <div class="lane-a"><b id="aRows">0</b><span>Python UDF: rows done</span></div>
+  <div class="lane-a"><b id="aCalls">0</b><span>Python UDF: function calls</span></div>
+  <div class="lane-a"><b id="aTime">–</b><span>Python UDF: finished at</span></div>
+  <div class="lane-b"><b id="bRows">0</b><span>pandas UDF: rows done</span></div>
+  <div class="lane-b"><b id="bCalls">0</b><span>pandas UDF: function calls</span></div>
+  <div class="lane-b"><b id="bTime">–</b><span>pandas UDF: finished at</span></div>
+</div>
+</div></div>
+
+<div class="wrap">
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>Plain Python UDF</th><th>pandas UDF (Arrow)</th></tr></thead>
+    <tbody>
+      <tr><td>Unit of transfer</td><td>One row, pickled</td><td>One Arrow record batch, ~10,000 rows by default</td></tr>
+      <tr><td>Conversions</td><td>Every value converted to a Python object and back</td><td>Column buffers handed over; pandas wraps them</td></tr>
+      <tr><td>Your function is called</td><td>Once per row, through the Python interpreter</td><td>Once per batch, with whole columns as pandas Series</td></tr>
+      <tr><td>Plan node in <code>explain()</code></td><td><code>BatchEvalPython</code></td><td><code>ArrowEvalPython</code></td></tr>
+    </tbody></table></div>
+  <p>Batches of rows are buffered in the Python worker's memory, which counts against the executor's <b>overhead</b>, not its heap. If pandas UDF stages get containers killed, lower the batch size or raise overhead (see <a href="../architecture/production.html#container-killed">Module 1</a>).</p>
+
+  <section id="vectorised">
+    <h2>What "vectorised" means</h2>
+    <p><b>Vectorised</b> code applies one operation to a whole array of values at once, instead of looping over values one at a time in an interpreted language. In pandas and NumPy, <code>s * 1.05</code> runs a single loop in compiled C over the whole column, often using CPU instructions that process several numbers per step (SIMD). A plain Python function pays the interpreter's overhead on every single value.</p>
+<pre><code>import pandas as pd
+from pyspark.sql import functions as F
+from pyspark.sql.functions import udf, pandas_udf
+
+@udf("double")
+def tax_row(amount):                       <span class="muted"># called once per row, in the Python interpreter</span>
+    return amount * 1.05
+
+@pandas_udf("double")
+def tax_vec(amount: pd.Series) -&gt; pd.Series:   <span class="muted"># called once per batch of ~10,000 rows</span>
+    return amount * 1.05                   <span class="muted"># one compiled loop over the whole array</span>
+
+df.withColumn("t", tax_row("amount"))      <span class="muted"># slowest: pickle + interpreter per row</span>
+df.withColumn("t", tax_vec("amount"))      <span class="muted"># much faster: Arrow + vectorised NumPy</span>
+df.withColumn("t", F.col("amount") * 1.05) <span class="muted"># fastest: no Python at all</span></code></pre>
+    <div class="callout trap"><div class="lbl">A pandas UDF isn't automatically vectorised</div>If your pandas UDF does <code>s.apply(lambda x: …)</code> or loops over rows in Python, you get Arrow's cheaper transfer but still pay the interpreter per value. The big win needs whole-column pandas or NumPy operations inside the function.</div>
+  </section>
+
+  <section id="where">
+    <h2>Where Spark uses Arrow</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>API</th><th>Function shape</th><th>Use it for</th></tr></thead>
+      <tbody>
+        <tr><td><code>df.toPandas()</code> / <code>spark.createDataFrame(pdf)</code></td><td>Whole DataFrame, via the driver</td><td>Moving small results between Spark and pandas</td></tr>
+        <tr><td>pandas UDF, Series → Series</td><td><code>def f(s: pd.Series) -&gt; pd.Series</code></td><td>Column transforms in <code>select</code> / <code>withColumn</code></td></tr>
+        <tr><td>pandas UDF, Iterator of Series</td><td><code>def f(it: Iterator[pd.Series]) -&gt; Iterator[pd.Series]</code></td><td>Expensive setup once per partition, e.g. loading a model</td></tr>
+        <tr><td>pandas UDF, Series → scalar</td><td><code>def f(s: pd.Series) -&gt; float</code></td><td>Custom aggregations in <code>groupBy().agg()</code>; each group in memory</td></tr>
+        <tr><td><code>mapInPandas</code></td><td><code>Iterator[pd.DataFrame] → Iterator[pd.DataFrame]</code></td><td>Whole-row logic over batches, no grouping</td></tr>
+        <tr><td><code>applyInPandas</code></td><td><code>pd.DataFrame → pd.DataFrame</code>, per group</td><td>Per-group logic; whole group in one worker</td></tr>
+        <tr><td>Arrow-optimised Python UDF</td><td><code>@udf(…, useArrow=True)</code>, row-wise function</td><td>Keeping existing row-wise code but speeding up the transfer (Spark 3.5+)</td></tr>
+      </tbody></table></div>
+    <p class="small muted">pandas UDFs, <code>mapInPandas</code> and <code>applyInPandas</code> always use Arrow. The <code>arrow.pyspark.enabled</code> setting controls only <code>toPandas</code> and <code>createDataFrame</code> from pandas.</p>
+  </section>
+
+  <section id="configs">
+    <h2>Configs worth knowing</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Config</th><th class="num">Default</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>spark.sql.execution.arrow.pyspark.enabled</code></td><td class="num">false*</td><td>Use Arrow for <code>toPandas</code> and <code>createDataFrame(pdf)</code></td></tr>
+        <tr><td><code>spark.sql.execution.arrow.pyspark.fallback.enabled</code></td><td class="num">true</td><td>Silently fall back to the slow path if Arrow fails (<a href="production.html#arrow">see production</a>)</td></tr>
+        <tr><td><code>spark.sql.execution.arrow.maxRecordsPerBatch</code></td><td class="num">10000</td><td>Rows per Arrow batch for pandas UDFs; lower it if Python workers run out of memory</td></tr>
+        <tr><td><code>spark.sql.execution.pythonUDF.arrow.enabled</code></td><td class="num">false</td><td>Use Arrow for all regular Python UDFs (Spark 3.5+)</td></tr>
+        <tr><td><code>spark.sql.parquet.enableVectorizedReader</code></td><td class="num">true</td><td>Read Parquet in columnar batches (see below)</td></tr>
+      </tbody></table></div>
+    <p class="small muted">* Off in open-source Spark; enabled by default on Databricks.</p>
+  </section>
+
+  <section id="three-meanings">
+    <h2>Three things called "vectorised" in Spark</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Term</th><th>What runs on batches of columns</th><th>Where you'll meet it</th></tr></thead>
+      <tbody>
+        <tr><td><b>pandas UDFs / Arrow</b></td><td>Your Python function, with NumPy and pandas doing the loops</td><td>PySpark code</td></tr>
+        <tr><td><b>Vectorised Parquet / ORC reader</b></td><td>Decoding files into column batches (4,096 rows by default) instead of row by row</td><td>Every scan stage; shows as <code>ColumnarToRow</code> in <code>explain()</code> when batches are turned into rows for the next operators</td></tr>
+        <tr><td><b>Photon</b></td><td>The whole query engine, written in C++, processing column batches with SIMD</td><td>Databricks; plan nodes named <code>Photon…</code></td></tr>
+      </tbody></table></div>
+    <p>For contrast, open-source Spark's <b>Tungsten whole-stage codegen</b> fuses the operators of a stage into one compiled Java function that processes <b>one row at a time</b> in a tight loop. It's fast because it removes per-operator overhead, but it's row-oriented, not vectorised. That's the main design difference Photon changes.</p>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Why pandas UDFs beat Python UDFs</div>"A plain Python UDF pickles every row, sends it to a Python worker and calls the function once per row in the interpreter. A pandas UDF ships Arrow record batches of about ten thousand rows, so there's no per-row conversion, and the function runs once per batch on whole pandas Series, which NumPy processes in compiled, vectorised loops."</div>
+    <div class="callout say"><div class="lbl">What Arrow is</div>"Apache Arrow is a language-neutral columnar in-memory format. Because the JVM and Python agree on the layout, Spark can hand column buffers to pandas without converting each value. Spark uses it for toPandas, createDataFrame from pandas, and all pandas UDFs."</div>
+    <div class="callout say"><div class="lbl">"Vectorised" in Spark</div>"It can mean pandas UDFs running NumPy over Arrow batches, the vectorised Parquet reader decoding column batches, or Photon, Databricks' C++ engine that processes whole column batches. Open-source Spark's whole-stage codegen is compiled but processes one row at a time."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Does setting <code>arrow.pyspark.enabled=false</code> make pandas UDFs stop using Arrow?</summary><div>No. pandas UDFs, <code>mapInPandas</code> and <code>applyInPandas</code> always use Arrow. That setting only affects <code>toPandas()</code> and <code>createDataFrame</code> from a pandas DataFrame.</div></details>
+      <details><summary>Your pandas UDF calls <code>s.apply(my_func)</code>. Is it vectorised?</summary><div>Only the transfer is. <code>apply</code> calls a Python function per value, so you still pay interpreter overhead per row. Rewrite with whole-Series operations (arithmetic, <code>np.where</code>, <code>.str</code> methods) to get the real speed-up.</div></details>
+      <details><summary>A pandas UDF stage keeps getting containers killed. Which Arrow setting can help?</summary><div><code>spark.sql.execution.arrow.maxRecordsPerBatch</code>: smaller batches mean less Python-worker memory per task. Raising executor memory overhead also helps.</div></details>
+      <details><summary>Why is Arrow → pandas conversion cheap but pickle → pandas expensive?</summary><div>Arrow and pandas are both columnar, so pandas can wrap Arrow's column buffers, often without copying. Pickled rows must be decoded one Python object at a time and reassembled into columns.</div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this topic</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id), NS="http://www.w3.org/2000/svg";
+  const reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  /* scan */
+  let scanTimer=null;
+  $("scanBtn").addEventListener("click",()=>{
+    clearInterval(scanTimer);
+    document.querySelectorAll("#lyT ~ rect").forEach(r=>r.classList.remove("hit"));
+    const rowSeq=[],colSeq=[];
+    for(let i=0;i<3;i++)for(let j=0;j<3;j++)rowSeq.push("rl-"+i+"-"+j);
+    for(let i=0;i<3;i++)colSeq.push("cl-"+i+"-2");
+    const touchedRow=rowSeq.length, touchedCol=colSeq.length;
+    const finish=()=>{$("scanOut").innerHTML="Row layout: walked through <b>"+touchedRow+" of 9</b> values to reach 3 amounts. Columnar: read <b>"+touchedCol+" of 9</b>, in one contiguous block.";};
+    if(reduce){rowSeq.concat(colSeq).forEach(id=>$(id).classList.add("hit"));finish();return;}
+    let k=0;$("scanOut").textContent="Reading…";
+    scanTimer=setInterval(()=>{
+      if(k<rowSeq.length)$(rowSeq[k]).classList.add("hit");
+      if(k<colSeq.length)$(colSeq[k]).classList.add("hit");
+      k++; if(k>=rowSeq.length){clearInterval(scanTimer);finish();}
+    },260);
+  });
+  /* race */
+  const N=1000,B=250,ROW=12,BATCH=ROW*B/12,TRAVEL=350,X0=190,X1=710,BW=110;
+  const endA=(N-1)*ROW+TRAVEL, endB=(N/B-1)*BATCH+TRAVEL, END=Math.max(endA,endB);
+  const dots=[],bats=[];
+  for(let i=0;i<40;i++){const c=document.createElementNS(NS,"circle");c.setAttribute("r","4");c.setAttribute("class","dotA");c.setAttribute("cy","98");c.style.display="none";$("dotsA").appendChild(c);dots.push(c);}
+  for(let i=0;i<3;i++){const g=document.createElementNS(NS,"g");g.innerHTML='<rect class="bxo" x="0" y="223" width="'+BW+'" height="30" rx="5"/><text class="tm" x="'+(BW/2)+'" y="243" text-anchor="middle" style="fill:var(--fg)">Arrow batch</text>';g.style.display="none";$("batchesB").appendChild(g);bats.push(g);}
+  let t=0,playing=false,last=null;
+  const fmt=ms=>(ms/1000).toFixed(1)+" s";
+  function draw(){
+    const doneA=Math.max(0,Math.min(N,Math.floor((t-TRAVEL)/ROW)+1));
+    let k=0;
+    const lo=Math.max(0,Math.ceil((t-TRAVEL)/ROW)), hi=Math.min(N-1,Math.floor(t/ROW));
+    for(let i=lo;i<=hi&&k<dots.length;i++){const p=(t-i*ROW)/TRAVEL;if(p<0||p>1)continue;dots[k].setAttribute("cx",X0+p*(X1-X0));dots[k].style.display="";k++;}
+    for(;k<dots.length;k++)dots[k].style.display="none";
+    const doneBatches=Math.max(0,Math.min(N/B,Math.floor((t-TRAVEL)/BATCH)+1));
+    k=0;
+    for(let j=0;j<N/B&&k<bats.length;j++){const p=(t-j*BATCH)/TRAVEL;if(p<0||p>1)continue;bats[k].setAttribute("transform","translate("+(X0+p*(X1-X0-BW))+",0)");bats[k].style.display="";k++;}
+    for(;k<bats.length;k++)bats[k].style.display="none";
+    $("pyA").classList.toggle("flash",t<endA+60&&doneA>0&&((t-TRAVEL)%ROW)<ROW*0.5);
+    $("pyB").classList.toggle("flash",doneBatches>0&&((t-TRAVEL)%BATCH)<90&&t<endB+90);
+    $("aRows").textContent=doneA.toLocaleString(); $("aCalls").textContent=doneA.toLocaleString();
+    $("bRows").textContent=(doneBatches*B).toLocaleString(); $("bCalls").textContent=doneBatches;
+    $("aTime").textContent=t>=endA?fmt(endA):"–"; $("bTime").textContent=t>=endB?fmt(endB):"–";
+  }
+  function frame(ts){ if(!playing)return; if(last==null)last=ts; t+=ts-last; last=ts;
+    if(t>=END){t=END;playing=false;$("raceBtn").textContent="Replay";}
+    draw(); if(playing)requestAnimationFrame(frame); }
+  $("raceBtn").addEventListener("click",()=>{
+    if(t>=END){t=0;}
+    if(reduce){t=END;draw();$("raceBtn").textContent="Replay";return;}
+    playing=!playing; $("raceBtn").textContent=playing?"Pause":"Play"; last=null; if(playing)requestAnimationFrame(frame);
+  });
+  $("raceReset").addEventListener("click",()=>{playing=false;t=0;last=null;$("raceBtn").textContent="Play";draw();});
+  draw();
+})();
+</script>
+<script>
+(function(){
+  const KEY="de-learning-done-v1",items=[[27,"Apache Arrow and vectorised execution (pandas UDFs)"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

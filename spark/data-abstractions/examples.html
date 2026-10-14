@@ -22,6 +22,7 @@
   <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">RDD, DataFrame, Dataset &amp; pandas</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
   <nav class="mtabs" aria-label="Module pages">
     <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
     <a href="examples.html" aria-current="page">Examples</a>
     <a href="production.html">Production issues</a>
   </nav>
@@ -189,7 +190,7 @@ small = big_df.filter("country = 'AE'").groupBy("segment").count().toPandas()</c
     <ol class="rail">
       <li><div><b>Built-in functions first.</b> Most logic is expressible with <code>pyspark.sql.functions</code>: <code>when</code>, <code>regexp_extract</code>, <code>transform</code> on arrays, <code>from_json</code>, window functions. Fastest, and fully optimised.
 <pre><code>df.withColumn("amount_with_tax", F.col("amount") * 1.05)</code></pre></div></li>
-      <li><div><b>pandas UDF</b> for column-wise logic that needs Python libraries. Data moves in Arrow batches and runs vectorised.
+      <li><div><b>pandas UDF</b> for column-wise logic that needs Python libraries. Data moves in Arrow batches and runs vectorised (<a href="deep-dive.html#vectorised">what that means</a>).
 <pre><code>import pandas as pd
 from pyspark.sql.functions import pandas_udf
 
