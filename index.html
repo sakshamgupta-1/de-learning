@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>DE Learning</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="index.html" aria-current="page">Hub</a>
+    <a href="spark-architecture.html">1 · Architecture</a>
+    <a href="spark-execution.html">2 · Execution</a>
+    <a href="spark-optimizer.html">3 · Optimizer &amp; AQE</a>
+    <a href="spark-tuning.html">4 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page">
+  <div class="wide">
+    <p class="eyebrow">Interview prep library</p>
+    <h1>Data engineering topics, one place</h1>
+    <p class="lede">Your original 12 questions merged with the extended list into 75 topics across seven areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
+
+    <div class="summary">
+      <div><div class="big" id="pct">0<small>/75</small></div><div class="muted small">topics done</div></div>
+      <div class="sectbars" id="sectbars"></div>
+    </div>
+
+    <section>
+      <p class="eyebrow">Start here</p>
+      <h2>Spark Core path</h2>
+      <p class="muted">Four pages, in order. Each one goes concept → picture → worked example → what breaks → how you would say it in an interview. Plan about 45–60 minutes per page.</p>
+      <div class="paths">
+        <a class="mod" href="spark-architecture.html" data-mod="arch">
+          <span class="n">Module 1</span><b>Architecture &amp; memory</b>
+          <p>Driver, executors, cluster manager, slots, the unified memory model, dynamic allocation.</p>
+          <div class="ft"><span>≈45 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+        <a class="mod" href="spark-execution.html" data-mod="exec">
+          <span class="n">Module 2</span><b>Execution flow &amp; lazy evaluation</b>
+          <p>spark-submit to completion, plan building, narrow vs wide, jobs → stages → tasks.</p>
+          <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+        <a class="mod" href="spark-optimizer.html" data-mod="opt">
+          <span class="n">Module 3</span><b>Catalyst, joins &amp; AQE</b>
+          <p>Optimizer phases, pushdown and pruning, reading explain(), join strategies, AQE, UDF cost.</p>
+          <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+        <a class="mod" href="spark-tuning.html" data-mod="tune">
+          <span class="n">Module 4</span><b>Performance tuning &amp; debugging</b>
+          <p>Debug flow, six failure scenarios, shuffle reduction, partition and executor sizing.</p>
+          <div class="ft"><span>≈75 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+      </div>
+      <p class="small muted" style="margin-top:1rem">Suggested order after Spark Core: Structured Streaming → Delta Lake &amp; Databricks → Iceberg → Modelling &amp; SQL → Pipelines → Governance. Ask in chat and the next path gets built into this hub.</p>
+    </section>
+
+    <section>
+      <p class="eyebrow">Tracker</p>
+      <h2>All topics</h2>
+      <div class="filters">
+        <div class="seg" role="tablist" aria-label="Filter topics" id="filt">
+          <button role="tab" aria-selected="true" data-f="all">All</button>
+          <button role="tab" aria-selected="false" data-f="todo">To do</button>
+          <button role="tab" aria-selected="false" data-f="done">Done</button>
+          <button role="tab" aria-selected="false" data-f="core">Original 12</button>
+        </div>
+        <span class="small muted"><span class="star">Original</span> marks a question from your first list.</span>
+      </div>
+      <div id="groups"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const A="spark-architecture.html",E="spark-execution.html",O="spark-optimizer.html",T="spark-tuning.html";
+const GROUPS=[
+ {id:"spark",name:"Spark core",items:[
+  ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
+  ["Executor memory model (unified memory, overhead)",A+"#memory","arch"],
+  ["Dynamic allocation and speculative execution",A+"#dynamic","arch"],
+  ["Spark execution flow from spark-submit to job completion",E+"#submit","exec"],
+  ["Lazy evaluation, lineage and RDD immutability",E+"#lazy","exec"],
+  ["Narrow vs wide transformations and stage boundaries",E+"#narrow-wide","exec"],
+  ["How jobs, stages and tasks are created",E+"#jobs","exec"],
+  ["reduceByKey vs groupByKey",E+"#rbk","exec"],
+  ["Catalyst optimizer and Tungsten",O+"#catalyst","opt"],
+  ["Predicate pushdown in Spark SQL",O+"#pushdown","opt",1],
+  ["Partition pruning vs dynamic partition pruning",O+"#pushdown","opt"],
+  ["Broadcast join vs sort-merge join vs shuffle hash join",O+"#joins","opt"],
+  ["Adaptive Query Execution (AQE) and what it optimizes",O+"#aqe","opt"],
+  ["Python UDF vs pandas UDF vs built-in functions",O+"#udf","opt"],
+  ["Reading the Spark UI to debug a slow job",T+"#debug","tune"],
+  ["Reduce shuffle operations",T+"#shuffle","tune",1],
+  ["Data skew and how it affects a Spark job",T+"#s-skew","tune",1],
+  ["Salting technique for skewed joins",T+"#s-skew","tune"],
+  ["OOM errors: how to analyse and resolve",T+"#s-oom","tune",1],
+  ["Disk spill and how to manage it",T+"#s-spill","tune",1],
+  ["Small-file problem and how to fix it",T+"#s-small","tune"],
+  ["Repartition vs coalesce",T+"#repartition","tune",1],
+  ["Spark executor selection and optimization",T+"#executors","tune",1],
+  ["Cache vs persist and storage levels",T+"#cache","tune"]]},
+ {id:"stream",name:"Structured Streaming",items:[
+  ["Different output modes in Structured Streaming",0,0,1],
+  ["How to handle late data in Structured Streaming",0,0,1],
+  ["Common performance bottlenecks in Structured Streaming",0,0,1],
+  ["Trigger types (processingTime, availableNow, continuous)"],
+  ["Checkpointing and exactly-once guarantees"],
+  ["foreachBatch and MERGE for streaming upserts"],
+  ["Stateful operations and the RocksDB state store"],
+  ["Stream-stream joins and watermarks"],
+  ["Auto Loader: directory listing vs file notification"],
+  ["Kafka offsets, consumer groups and delivery semantics"]]},
+ {id:"delta",name:"Delta Lake & Databricks",items:[
+  ["OPTIMIZE vs ZORDER",0,0,1],
+  ["How to handle deletes in Lakeflow",0,0,1],
+  ["Delta transaction log and optimistic concurrency"],
+  ["OPTIMIZE vs VACUUM"],
+  ["Liquid clustering vs partitioning + ZORDER"],
+  ["Deletion vectors and MERGE performance"],
+  ["Change Data Feed and its use cases"],
+  ["Schema enforcement vs schema evolution"],
+  ["Time travel and RESTORE"],
+  ["AUTO CDC / APPLY CHANGES for SCD Type 1 and 2"],
+  ["Streaming tables vs materialized views in Lakeflow"],
+  ["Lakeflow expectations (warn, drop, fail)"],
+  ["Unity Catalog object model and privileges"],
+  ["Row filters, column masks and ABAC in Unity Catalog"],
+  ["Hive Metastore to Unity Catalog migration approach"],
+  ["Databricks Asset Bundles for CI/CD"]]},
+ {id:"iceberg",name:"Iceberg & table formats",items:[
+  ["Iceberg metadata layers (metadata.json, manifest list, manifests)"],
+  ["Hidden partitioning and partition evolution"],
+  ["Copy-on-write vs merge-on-read"],
+  ["Iceberg maintenance (compaction, expire snapshots, orphan files)"],
+  ["Delta vs Iceberg vs Hudi"]]},
+ {id:"model",name:"Data modelling & SQL",items:[
+  ["Star vs snowflake schema"],
+  ["SCD Type 1 vs 2 vs 3, and SCD2 with MERGE"],
+  ["Fact table types (transaction, periodic snapshot, accumulating)"],
+  ["Medallion architecture: what goes in each layer"],
+  ["Window functions: dedup, top-N per group, running totals"],
+  ["Gaps-and-islands and sessionization"]]},
+ {id:"pipe",name:"Pipelines, orchestration & quality",items:[
+  ["Idempotent pipelines and safe reruns"],
+  ["Backfilling history without disrupting daily loads"],
+  ["Handling schema drift from source systems"],
+  ["CDC approaches: log-based vs query-based"],
+  ["Airflow sensors vs deferrable operators"],
+  ["Airflow catchup, backfill and retries"],
+  ["dbt incremental models and tests"],
+  ["Data quality checks: where and how to enforce"],
+  ["Data contracts with source teams"],
+  ["Pipeline monitoring and alerting"]]},
+ {id:"gov",name:"Governance & cloud",items:[
+  ["RBAC vs ABAC"],
+  ["PII masking vs tokenization vs encryption"],
+  ["Data lineage and impact analysis"],
+  ["Parquet vs Avro vs ORC"]]}
+];
+const KEY="de-learning-done-v1";
+let done={};
+try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){done={}}
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(done))}catch(e){}};
+let filter="all";
+const total=GROUPS.reduce((n,g)=>n+g.items.length,0);
+
+function render(){
+  const root=document.getElementById("groups");root.innerHTML="";
+  let n=0;
+  GROUPS.forEach(g=>{
+    const wrap=document.createElement("div");wrap.className="tgroup";
+    const cnt=g.items.filter((_,i)=>done[g.id+i]).length;
+    wrap.innerHTML=`<h3>${g.name}<span>${cnt}/${g.items.length}</span></h3>`;
+    let shown=0;
+    g.items.forEach((it,i)=>{
+      n++;const id=g.id+i,isDone=!!done[id],core=!!it[3];
+      if(filter==="todo"&&isDone)return; if(filter==="done"&&!isDone)return; if(filter==="core"&&!core)return;
+      shown++;
+      const row=document.createElement("div");row.className="topic"+(isDone?" done":"");
+      row.innerHTML=`<input type="checkbox" id="t-${id}" ${isDone?"checked":""} aria-label="Mark done">
+        <span class="num">${String(n).padStart(2,"0")}</span>
+        <label class="ttl" for="t-${id}">${it[0]}${core?'<span class="star">Original</span>':""}</label>
+        ${it[1]?`<a class="go" href="${it[1]}">Study →</a>`:'<span class="soon">page to come</span>'}`;
+      row.querySelector("input").addEventListener("change",e=>{done[id]=e.target.checked;if(!e.target.checked)delete done[id];save();render()});
+      wrap.appendChild(row);
+    });
+    if(shown)root.appendChild(wrap);
+  });
+  if(!root.children.length)root.innerHTML='<p class="muted">Nothing here yet for this filter.</p>';
+  stats();
+}
+function stats(){
+  const d=Object.keys(done).length;
+  document.getElementById("pct").innerHTML=`${d}<small>/${total}</small>`;
+  document.getElementById("sectbars").innerHTML=GROUPS.map(g=>{
+    const c=g.items.filter((_,i)=>done[g.id+i]).length;
+    return `<div class="sb">${g.name} · ${c}/${g.items.length}<div class="tr"><i style="width:${c/g.items.length*100}%"></i></div></div>`}).join("");
+  document.querySelectorAll(".mod").forEach(m=>{
+    const k=m.dataset.mod,items=GROUPS[0].items.map((it,i)=>[it,i]).filter(([it])=>it[2]===k);
+    const c=items.filter(([_,i])=>done["spark"+i]).length;
+    m.querySelector(".mc").textContent=`${c}/${items.length} topics`;
+    m.querySelector(".bar i").style.width=(c/items.length*100)+"%";
+  });
+}
+document.querySelectorAll("#filt button").forEach(b=>b.addEventListener("click",()=>{
+  filter=b.dataset.f;document.querySelectorAll("#filt button").forEach(x=>x.setAttribute("aria-selected",x===b));render()}));
+render();
+</script>
+</body></html>

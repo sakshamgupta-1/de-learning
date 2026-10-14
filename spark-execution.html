@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Execution Flow</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="index.html">Hub</a>
+    <a href="spark-architecture.html">1 · Architecture</a>
+    <a href="spark-execution.html" aria-current="page">2 · Execution</a>
+    <a href="spark-optimizer.html">3 · Optimizer &amp; AQE</a>
+    <a href="spark-tuning.html">4 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <p class="eyebrow">Spark Core · Module 2 of 4</p>
+  <h1>From your code to running tasks</h1>
+  <p class="lede">Spark records what you want, waits for an action, then turns the plan into jobs, stages and tasks. Walk one pipeline through every step.</p>
+  <div class="toc">
+    <a href="#submit">spark-submit flow</a><a href="#lazy">Lazy evaluation</a><a href="#narrow-wide">Narrow vs wide</a><a href="#jobs">Jobs, stages, tasks</a><a href="#rbk">reduceByKey vs groupByKey</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="submit">
+    <h2>spark-submit to job completion</h2>
+    <ol class="rail">
+      <li><div><b>Submit.</b> <code>spark-submit</code> (or a Databricks job) starts the driver with your code and config.</div></li>
+      <li><div><b>Driver starts.</b> Creates the SparkSession and asks the cluster manager for executors.</div></li>
+      <li><div><b>Executors launch and register</b> with the driver.</div></li>
+      <li><div><b>Code runs on the driver.</b> Each transformation only adds a step to a <i>logical plan</i>. No data moves.</div></li>
+      <li><div><b>An action is called</b> (<code>write</code>, <code>count</code>, <code>collect</code>, <code>show</code>). Spark creates a <b>job</b>.</div></li>
+      <li><div><b>Catalyst optimises</b> the logical plan and picks a physical plan (Module 3).</div></li>
+      <li><div><b>DAG scheduler</b> cuts the physical plan into <b>stages</b> at every shuffle and submits them in dependency order.</div></li>
+      <li><div><b>Task scheduler</b> sends one <b>task per partition</b> to free executor cores, preferring data locality.</div></li>
+      <li><div><b>Executors run tasks.</b> A stage ending in a shuffle writes shuffle files locally; the next stage reads them over the network.</div></li>
+      <li><div><b>Job finishes</b> when the last stage completes. Failed tasks are retried (default 4 attempts) using lineage. The application ends when the SparkSession stops.</div></li>
+    </ol>
+  </section>
+
+  <section id="lazy">
+    <h2>Lazy evaluation, step by step</h2>
+    <p>Step through a realistic pipeline. Watch the plan grow while the "rows read" counter stays at zero until the action.</p>
+  </section>
+</div>
+
+<div class="wide">
+  <div class="stepper">
+    <div>
+      <div class="codelines" id="code"></div>
+      <div class="ctrl">
+        <button class="btn ghost" id="prev">← Back</button>
+        <button class="btn" id="nxt">Run next line →</button>
+        <button class="btn ghost" id="rst">Reset</button>
+      </div>
+    </div>
+    <div>
+      <div class="counters" id="ctr"></div>
+      <div class="planview" id="plan" style="margin-top:.7rem" aria-live="polite"></div>
+      <div class="note" id="why"></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <h3>Why Spark is lazy</h3>
+  <ul>
+    <li><b>Whole-plan optimisation.</b> Seeing the full chain lets Catalyst push the <code>country = 'AE'</code> filter into the file scan and read only the needed columns.</li>
+    <li><b>Fewer passes.</b> Consecutive narrow steps are fused into one stage, so data is read once.</li>
+    <li><b>Fault tolerance through lineage.</b> The plan is a recipe. If an executor dies, Spark recomputes only the lost partitions from the recipe.</li>
+  </ul>
+  <h3>RDD immutability and lineage</h3>
+  <p>An RDD (and the DataFrame built on it) is an immutable, partitioned collection plus the lineage of transformations that produced it. Every transformation returns a <i>new</i> dataset. Immutability is what makes recomputation safe: a lost partition rebuilt from lineage is guaranteed to equal the original, and tasks can run in parallel without locks.</p>
+  <div class="callout trap"><div class="lbl">Common trap</div>Every action re-runs the whole lineage. Calling <code>df.count()</code> and then <code>df.write...</code> on an expensive DataFrame reads and computes everything twice. Cache it, or restructure so you need one action.</div>
+
+  <section id="narrow-wide">
+    <h2>Narrow vs wide transformations</h2>
+    <p>The single most important distinction in Spark performance. A <b>narrow</b> transformation computes each output partition from one input partition. A <b>wide</b> transformation needs rows from many partitions, so data must be <b>shuffled</b> across the network, and that creates a stage boundary.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 290" role="img" aria-labelledby="nwT">
+  <title id="nwT">Narrow transformation maps partitions one to one; wide transformation shuffles all to all across a stage boundary</title>
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="ahb" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <text class="th" x="20" y="28">Narrow · filter, select, withColumn, map</text>
+  <text class="ts" x="20" y="48">same stage, no network, can be pipelined</text>
+  <g>
+    <rect class="bx" x="30" y="70" width="96" height="44" rx="6"/><text class="tm" x="78" y="97" text-anchor="middle">P0</text>
+    <rect class="bx" x="30" y="140" width="96" height="44" rx="6"/><text class="tm" x="78" y="167" text-anchor="middle">P1</text>
+    <rect class="bx" x="30" y="210" width="96" height="44" rx="6"/><text class="tm" x="78" y="237" text-anchor="middle">P2</text>
+    <rect class="bxb" x="270" y="70" width="96" height="44" rx="6"/><text class="tm" x="318" y="97" text-anchor="middle">P0'</text>
+    <rect class="bxb" x="270" y="140" width="96" height="44" rx="6"/><text class="tm" x="318" y="167" text-anchor="middle">P1'</text>
+    <rect class="bxb" x="270" y="210" width="96" height="44" rx="6"/><text class="tm" x="318" y="237" text-anchor="middle">P2'</text>
+    <line class="lnb" x1="126" y1="92" x2="266" y2="92" marker-end="url(#b1)"/>
+    <line class="lnb" x1="126" y1="162" x2="266" y2="162" marker-end="url(#b1)"/>
+    <line class="lnb" x1="126" y1="232" x2="266" y2="232" marker-end="url(#b1)"/>
+  </g>
+  <text class="th" x="450" y="28">Wide · groupBy, join, distinct, orderBy</text>
+  <text class="ts" x="450" y="48">shuffle: every input can send rows to every output</text>
+  <g>
+    <rect class="bx" x="460" y="70" width="96" height="44" rx="6"/><text class="tm" x="508" y="97" text-anchor="middle">P0</text>
+    <rect class="bx" x="460" y="140" width="96" height="44" rx="6"/><text class="tm" x="508" y="167" text-anchor="middle">P1</text>
+    <rect class="bx" x="460" y="210" width="96" height="44" rx="6"/><text class="tm" x="508" y="237" text-anchor="middle">P2</text>
+    <rect class="bxa" x="740" y="70" width="96" height="44" rx="6"/><text class="tm" x="788" y="97" text-anchor="middle">key A–H</text>
+    <rect class="bxa" x="740" y="140" width="96" height="44" rx="6"/><text class="tm" x="788" y="167" text-anchor="middle">key I–P</text>
+    <rect class="bxa" x="740" y="210" width="96" height="44" rx="6"/><text class="tm" x="788" y="237" text-anchor="middle">key Q–Z</text>
+    <g class="lna" marker-end="url(#b2)">
+      <line class="lna" x1="556" y1="92" x2="736" y2="92" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="92" x2="736" y2="160" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="92" x2="736" y2="228" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="162" x2="736" y2="96" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="162" x2="736" y2="162" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="162" x2="736" y2="228" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="232" x2="736" y2="96" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="232" x2="736" y2="164" marker-end="url(#b2)"/>
+      <line class="lna" x1="556" y1="232" x2="736" y2="232" marker-end="url(#b2)"/>
+    </g>
+    <line class="ln dash" x1="648" y1="62" x2="648" y2="262"/>
+    <text class="ts" x="648" y="282" text-anchor="middle">shuffle = stage boundary</text>
+  </g>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="tbl"><table>
+    <thead><tr><th>Narrow (no shuffle)</th><th>Wide (shuffle)</th><th>Depends</th></tr></thead>
+    <tbody><tr>
+      <td><code>select</code>, <code>filter</code>/<code>where</code>, <code>withColumn</code>, <code>map</code>, <code>flatMap</code>, <code>mapPartitions</code>, <code>union</code>, <code>coalesce</code>, <code>sample</code>, <code>explode</code></td>
+      <td><code>groupBy</code>/<code>agg</code>, <code>distinct</code>, <code>dropDuplicates</code>, <code>orderBy</code>/<code>sort</code>, <code>repartition</code>, sort-merge <code>join</code>, window functions with <code>partitionBy</code>, <code>reduceByKey</code></td>
+      <td><code>join</code> is narrow on the large side when the other side is <b>broadcast</b>, or when both sides are already partitioned the same way (bucketing)</td>
+    </tr></tbody></table></div>
+  <h3>map vs flatMap</h3>
+<pre><code>rdd = sc.parallelize(["spark is fast", "delta lake"])
+rdd.map(lambda s: s.split(" ")).collect()
+<span class="muted"># [['spark','is','fast'], ['delta','lake']]   one output per input</span>
+rdd.flatMap(lambda s: s.split(" ")).collect()
+<span class="muted"># ['spark','is','fast','delta','lake']         zero or more outputs, flattened</span></code></pre>
+  <p class="small muted">DataFrame equivalent of flatMap: <code>F.explode(F.split("text", " "))</code>.</p>
+
+  <section id="jobs">
+    <h2>Jobs, stages and tasks for our pipeline</h2>
+    <ul>
+      <li><b>Jobs</b>: one per action. Some actions create extra small jobs (schema inference, file listing, a broadcast build).</li>
+      <li><b>Stages</b>: Spark walks back from the final operation; every wide dependency (Exchange) starts a new stage. Stages with no dependency on each other can run in parallel.</li>
+      <li><b>Tasks</b>: one per partition of that stage. Scan stages get one task per file split (~128 MB by default); post-shuffle stages get <code>spark.sql.shuffle.partitions</code> (default 200), unless AQE coalesces them.</li>
+    </ul>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 900 300" role="img" aria-labelledby="stT">
+  <title id="stT">The example write job split into four stages separated by shuffles</title>
+  <defs><marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect class="bxb" x="20" y="30" width="230" height="104" rx="8"/>
+  <text class="tb" x="36" y="56">Stage 0 · orders</text><text class="ts" x="36" y="78">Scan parquet → Filter AE → Project</text><text class="ts" x="36" y="96">shuffle write, hashed by cust_id</text><text class="tm" x="36" y="120">e.g. 120 tasks (file splits)</text>
+  <rect class="bxb" x="20" y="168" width="230" height="104" rx="8"/>
+  <text class="tb" x="36" y="194">Stage 1 · customers</text><text class="ts" x="36" y="216">Scan → Project</text><text class="ts" x="36" y="234">shuffle write, hashed by cust_id</text><text class="tm" x="36" y="258">e.g. 40 tasks</text>
+  <rect class="bxa" x="340" y="98" width="240" height="104" rx="8"/>
+  <text class="tb" x="356" y="124">Stage 2 · join</text><text class="ts" x="356" y="146">Sort-merge join → partial sum</text><text class="ts" x="356" y="164">shuffle write, hashed by segment</text><text class="tm" x="356" y="188">200 tasks (shuffle.partitions)</text>
+  <rect class="bxo" x="670" y="98" width="210" height="104" rx="8"/>
+  <text class="tb" x="686" y="124">Stage 3 · result</text><text class="ts" x="686" y="146">Final sum → write table</text><text class="ts" x="686" y="164">AQE may coalesce to a</text><text class="tm" x="686" y="188">few tasks</text>
+  <path class="lna" d="M250,82 C300,82 300,136 336,140" marker-end="url(#c1)"/>
+  <path class="lna" d="M250,220 C300,220 300,166 336,162" marker-end="url(#c1)"/>
+  <line class="lna" x1="580" y1="150" x2="666" y2="150" marker-end="url(#c1)"/>
+  <text class="ts" x="294" y="76" text-anchor="middle">Exchange</text>
+  <text class="ts" x="294" y="236" text-anchor="middle">Exchange</text>
+  <text class="ts" x="623" y="140" text-anchor="middle">Exchange</text>
+</svg>
+<p class="cap">One action → one job → four stages. If <code>customers</code> is under the broadcast threshold (10 MB by default), Stage 1 becomes a broadcast, the orders side is not shuffled, and Stages 0 and 2 merge into one.</p>
+</div></div>
+
+<div class="wrap">
+  <div class="callout say"><div class="lbl">Say it in an interview</div>
+  "An action creates a job. The DAG scheduler walks the plan back from the result and starts a new stage at every shuffle dependency, so stages are runs of narrow transformations. Each stage runs one task per partition, so partitions decide parallelism."</div>
+
+  <section id="rbk">
+    <h2>reduceByKey vs groupByKey</h2>
+    <p>Both group by key and both shuffle. The difference is how much they shuffle.</p>
+    <div class="ba">
+      <div><h4>groupByKey</h4>
+        <p class="small">Ships <b>every</b> (key, value) pair across the network, then builds the full list of values per key in memory on the reducer.</p>
+        <p class="tm small" style="font-family:var(--mono)">map side: (a,1) (a,1) (a,1) (b,1)<br>shuffled: 4 records</p>
+        <p class="small" style="color:var(--bad)">A hot key's whole value list must fit in one task's memory → OOM risk.</p></div>
+      <div><h4>reduceByKey</h4>
+        <p class="small">Combines values <b>on the map side first</b> (like a Hadoop Combiner), then shuffles one partial result per key per partition.</p>
+        <p class="small" style="font-family:var(--mono)">map side: (a,3) (b,1)<br>shuffled: 2 records</p>
+        <p class="small" style="color:var(--ok)">Less network, less memory. Use it (or aggregateByKey) whenever the function is associative.</p></div>
+    </div>
+    <p class="small muted">With DataFrames you get this automatically: <code>groupBy().agg(sum(...))</code> plans a <code>partial_sum</code> before the shuffle and a final sum after it. You can see both in <code>explain()</code>.</p>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>How many jobs: <code>df = spark.read.parquet(p); df.count(); df.filter(...).write.parquet(q)</code>?</summary><div>At least two, one per action (<code>count</code> and <code>write</code>). The read itself may add a small listing or schema job. Both actions re-read the files unless <code>df</code> is cached.</div></details>
+      <details><summary>Where exactly is a stage boundary created?</summary><div>At every wide (shuffle) dependency, shown as <code>Exchange</code> in the physical plan. Narrow operations on either side are pipelined into the same stage.</div></details>
+      <details><summary>Is <code>coalesce</code> narrow or wide?</summary><div>Narrow. It merges existing partitions without a shuffle. <code>repartition</code> is wide. Module 4 covers the performance consequences.</div></details>
+      <details><summary>Why is a <code>join</code> sometimes narrow?</summary><div>With a broadcast join, the small table is copied to every executor and the large side is joined in place, so the large side needs no shuffle. Pre-bucketed tables on the join key also avoid the shuffle.</div></details>
+      <details><summary>What does Spark do if a task fails?</summary><div>The task scheduler retries it (default <code>spark.task.maxFailures=4</code>). If shuffle output from a previous stage is lost (executor died), the parent stage's affected tasks are recomputed from lineage.</div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="spark-architecture.html"><span>Previous · Module 1</span><b>Architecture &amp; memory</b></a>
+    <a href="spark-optimizer.html"><span>Next · Module 3</span><b>Catalyst, joins &amp; AQE</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const LINES=[
+    ['orders = spark.read.parquet("s3://lake/orders")', [["Scan orders","narrow"]], 'Only file metadata and the schema are read. No rows yet. (Spark may run a small listing job for many files.)', false],
+    ['ae = orders.filter(col("country") == "AE")', [["Filter country = AE","narrow"]], 'Narrow transformation. Added to the plan. Catalyst will later push this filter into the scan.', false],
+    ['cust = spark.table("ref.customers")', [["Scan customers","narrow"]], 'A second input. Still nothing executed.', false],
+    ['j = ae.join(cust, "cust_id")', [["Join on cust_id  ⇢ shuffle (or broadcast)","wide"]], 'Wide: matching keys must meet on the same executor. Unless customers is small enough to broadcast, both sides will be shuffled by cust_id.', false],
+    ['out = j.groupBy("segment").agg(sum("amount"))', [["Aggregate by segment  ⇢ shuffle","wide"]], 'Wide again: all rows of one segment must meet. Spark plans a partial sum before the shuffle and a final sum after it.', false],
+    ['out.write.mode("overwrite").saveAsTable("gold.sales_by_segment")', [["ACTION: write → Job 1 starts","act"]], 'The action. Catalyst optimises the whole plan, the DAG scheduler cuts it into 4 stages at the 3 shuffles, and tasks start reading files. See the stage diagram below.', true]
+  ];
+  let step=-1;
+  function render(){
+    $("code").innerHTML=LINES.map((l,i)=>`<div class="${i<step?'done':i===step?'cur':''}">${l[0].replace(/&/g,"&amp;").replace(/</g,"&lt;")}</div>`).join("");
+    let nodes=[];for(let i=0;i<=step;i++)nodes=nodes.concat(LINES[i][1].map(n=>[...n,i===step]));
+    $("plan").innerHTML=nodes.length?nodes.map(([t,c,isNew])=>`<div class="pnode ${c}${isNew?' new':''}">${t}</div>`).join(""):'<div class="pnode">Logical plan is empty</div>';
+    const acted=step>=0&&LINES[step][3];
+    $("ctr").innerHTML=`<span class="chip">plan nodes: ${nodes.length}</span><span class="chip ${acted?'ok':''}">jobs: ${acted?1:0}</span><span class="chip ${acted?'ok':'bad'}">rows read: ${acted?'millions':'0'}</span>`;
+    $("why").textContent=step<0?'Press "Run next line" to execute the first line of code.':LINES[step][2];
+    $("prev").disabled=step<0;$("nxt").disabled=step>=LINES.length-1;
+  }
+  $("nxt").onclick=()=>{if(step<LINES.length-1){step++;render()}};
+  $("prev").onclick=()=>{if(step>=0){step--;render()}};
+  $("rst").onclick=()=>{step=-1;render()};
+  render();
+
+  const KEY="de-learning-done-v1",items=[[3,"Spark execution flow from spark-submit to job completion"],[4,"Lazy evaluation, lineage and RDD immutability"],[5,"Narrow vs wide transformations and stage boundaries"],[6,"How jobs, stages and tasks are created"],[7,"reduceByKey vs groupByKey"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    $("mine").appendChild(row)});
+})();
+</script>
+</body></html>

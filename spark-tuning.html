@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Tuning and Debugging</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="index.html">Hub</a>
+    <a href="spark-architecture.html">1 · Architecture</a>
+    <a href="spark-execution.html">2 · Execution</a>
+    <a href="spark-optimizer.html">3 · Optimizer &amp; AQE</a>
+    <a href="spark-tuning.html" aria-current="page">4 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <p class="eyebrow">Spark Core · Module 4 of 4</p>
+  <h1>Finding and fixing slow Spark jobs</h1>
+  <p class="lede">Interviewers rarely ask "what is skew?" on its own. They describe a slow or failing job and watch how you investigate. Learn the flow first, then the six scenarios it leads to.</p>
+  <div class="toc">
+    <a href="#debug">Debug flow</a><a href="#scenarios">Six scenarios</a><a href="#shuffle">Reducing shuffle</a><a href="#repartition">repartition vs coalesce</a><a href="#partitions">Partition sizing</a><a href="#executors">Executor sizing</a><a href="#cache">Cache vs persist</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="debug">
+    <h2>The debug flow</h2>
+    <p>Start in the Spark UI: <b>Jobs</b> → the slowest job → <b>Stages</b> → the slowest stage → its <b>summary metrics</b> (min / 25th / median / 75th / max per task). Most answers come from comparing median and max, and from the spill and shuffle columns. Click an outcome to open that scenario.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 820 560" role="img" aria-labelledby="dbgT">
+  <title id="dbgT">Decision flow for diagnosing a slow or failing Spark job</title>
+  <defs>
+    <marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <rect class="bx2" x="40" y="14" width="440" height="46" rx="23"/><text class="tb" x="260" y="42" text-anchor="middle">Job is slow, or fails</text>
+  <rect class="bx" x="40" y="94" width="440" height="50" rx="8"/><text class="t" x="260" y="124" text-anchor="middle">Did tasks fail with OutOfMemory or "container killed"?</text>
+  <rect class="bx" x="40" y="174" width="440" height="50" rx="8"/><text class="t" x="260" y="204" text-anchor="middle">In the slowest stage, is max task time ≫ median?</text>
+  <rect class="bx" x="40" y="254" width="440" height="50" rx="8"/><text class="t" x="260" y="284" text-anchor="middle">Does the stage show Spill (memory / disk)?</text>
+  <rect class="bx" x="40" y="334" width="440" height="50" rx="8"/><text class="t" x="260" y="364" text-anchor="middle">Thousands of very short tasks, or thousands of files?</text>
+  <rect class="bx" x="40" y="414" width="440" height="50" rx="8"/><text class="t" x="260" y="444" text-anchor="middle">Large shuffle read/write, or a big table in SortMergeJoin?</text>
+  <rect class="bx2" x="40" y="494" width="440" height="50" rx="25"/><text class="t" x="260" y="524" text-anchor="middle">Check GC time, Python UDFs, source I/O, cluster size</text>
+  <g>
+    <line class="ln" x1="260" y1="60" x2="260" y2="90" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="144" x2="260" y2="170" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="224" x2="260" y2="250" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="304" x2="260" y2="330" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="384" x2="260" y2="410" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="464" x2="260" y2="490" marker-end="url(#f1)"/>
+    <text class="ts" x="270" y="162">no</text><text class="ts" x="270" y="242">no</text><text class="ts" x="270" y="322">no</text><text class="ts" x="270" y="402">no</text><text class="ts" x="270" y="482">no</text>
+  </g>
+  <g>
+    <line class="lna" x1="480" y1="119" x2="556" y2="119" marker-end="url(#f2)"/><text class="ts" x="500" y="111">yes</text>
+    <line class="lna" x1="480" y1="199" x2="556" y2="199" marker-end="url(#f2)"/><text class="ts" x="500" y="191">yes</text>
+    <line class="lna" x1="480" y1="279" x2="556" y2="279" marker-end="url(#f2)"/><text class="ts" x="500" y="271">yes</text>
+    <line class="lna" x1="480" y1="359" x2="556" y2="359" marker-end="url(#f2)"/><text class="ts" x="500" y="351">yes</text>
+    <line class="lna" x1="480" y1="439" x2="556" y2="439" marker-end="url(#f2)"/><text class="ts" x="500" y="431">yes</text>
+  </g>
+  <a href="#s-oom"><rect class="bxr" x="560" y="94" width="240" height="50" rx="8"/><text class="tb" x="680" y="124" text-anchor="middle">OOM: executor or driver →</text></a>
+  <a href="#s-skew"><rect class="bxa" x="560" y="174" width="240" height="50" rx="8"/><text class="tb" x="680" y="204" text-anchor="middle">Data skew →</text></a>
+  <a href="#s-spill"><rect class="bxa" x="560" y="254" width="240" height="50" rx="8"/><text class="tb" x="680" y="284" text-anchor="middle">Disk spill →</text></a>
+  <a href="#s-small"><rect class="bxb" x="560" y="334" width="240" height="50" rx="8"/><text class="tb" x="680" y="364" text-anchor="middle">Small files / too many partitions →</text></a>
+  <a href="#s-shuffle"><rect class="bxb" x="560" y="414" width="240" height="50" rx="8"/><text class="tb" x="680" y="444" text-anchor="middle">Heavy shuffle / slow join →</text></a>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <h3>Where each signal lives in the Spark UI</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Signal</th><th>Where to look</th></tr></thead>
+    <tbody>
+      <tr><td>Which job/stage is slow</td><td><b>Jobs</b> and <b>Stages</b> tabs, sort by duration</td></tr>
+      <tr><td>Skew</td><td>Stage → <b>Summary Metrics</b>: Duration and Shuffle Read Size, max vs median; Event Timeline with one long bar</td></tr>
+      <tr><td>Spill</td><td>Stage → <b>Spill (Memory)</b> and <b>Spill (Disk)</b> columns</td></tr>
+      <tr><td>GC pressure</td><td>Stage task table → <b>GC Time</b>; Executors tab → GC time vs task time (over ~10% is a warning)</td></tr>
+      <tr><td>Failures</td><td>Stage → failed tasks → error column; <b>Executors</b> tab → dead executors and logs</td></tr>
+      <tr><td>Final plan, rows per operator</td><td><b>SQL / DataFrame</b> tab: the plan after AQE, with row counts and sizes per node</td></tr>
+    </tbody></table></div>
+
+  <section id="scenarios">
+    <h2>Six scenarios</h2>
+    <p>Each one: what you see, why it happens, how to confirm it, how to fix it, and a short interview answer. Metrics are representative examples.</p>
+    <div class="seg" role="tablist" id="scTabs"></div>
+    <div class="scn" id="scn" aria-live="polite"></div>
+  </section>
+
+  <section id="shuffle">
+    <h2>Reducing shuffle: the checklist</h2>
+    <ol class="rail">
+      <li><div><b>Read less.</b> Filter and select columns as early as possible; make sure filters reach the scan (PushedFilters / PartitionFilters).</div></li>
+      <li><div><b>Broadcast small sides.</b> Raise the threshold or add a hint for dimension tables up to a few hundred MB.</div></li>
+      <li><div><b>Pre-aggregate before joining.</b> Aggregate the fact to the grain you need, then join the smaller result.</div></li>
+      <li><div><b>Remove accidental shuffles.</b> Unneeded <code>distinct</code>, <code>orderBy</code> before a write, <code>repartition</code> before a join that reshuffles anyway, window functions with a different <code>partitionBy</code> each time.</div></li>
+      <li><div><b>Shuffle once, reuse.</b> Several joins or aggregations on the same key in a row: Spark reuses an existing partitioning on that key. Bucketing (or co-located clustering) avoids the shuffle for repeated joins on large tables.</div></li>
+      <li><div><b>Right-size what's left.</b> Let AQE coalesce, or set <code>spark.sql.shuffle.partitions</code> so each shuffle partition is roughly 100–200 MB.</div></li>
+    </ol>
+  </section>
+
+  <section id="repartition">
+    <h2>repartition vs coalesce</h2>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 250" role="img" aria-labelledby="rcT">
+  <title id="rcT">repartition shuffles into even partitions; coalesce merges neighbouring partitions without a shuffle</title>
+  <defs><marker id="g1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  <marker id="g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="ahb" d="M0,0L10,5L0,10z"/></marker></defs>
+  <text class="th" x="20" y="28">repartition(3) · full shuffle</text>
+  <text class="ts" x="20" y="48">even sizes, can go up or down, costs network</text>
+  <rect class="bx" x="30" y="70" width="60" height="30" rx="4"/><rect class="bx" x="30" y="110" width="60" height="70" rx="4"/><rect class="bx" x="30" y="190" width="60" height="20" rx="4"/>
+  <rect class="bxa" x="300" y="80" width="60" height="40" rx="4"/><rect class="bxa" x="300" y="130" width="60" height="40" rx="4"/><rect class="bxa" x="300" y="180" width="60" height="40" rx="4"/>
+  <line class="lna" x1="90" y1="85" x2="296" y2="100" marker-end="url(#g1)"/><line class="lna" x1="90" y1="85" x2="296" y2="150" marker-end="url(#g1)"/>
+  <line class="lna" x1="90" y1="145" x2="296" y2="100" marker-end="url(#g1)"/><line class="lna" x1="90" y1="145" x2="296" y2="150" marker-end="url(#g1)"/><line class="lna" x1="90" y1="145" x2="296" y2="200" marker-end="url(#g1)"/>
+  <line class="lna" x1="90" y1="200" x2="296" y2="200" marker-end="url(#g1)"/>
+  <text class="th" x="460" y="28">coalesce(2) · no shuffle</text>
+  <text class="ts" x="460" y="48">merges neighbours, cheap, sizes stay uneven</text>
+  <rect class="bx" x="470" y="70" width="60" height="30" rx="4"/><rect class="bx" x="470" y="110" width="60" height="70" rx="4"/><rect class="bx" x="470" y="190" width="60" height="20" rx="4"/>
+  <rect class="bxb" x="740" y="70" width="60" height="110" rx="4"/><rect class="bxb" x="740" y="190" width="60" height="20" rx="4"/>
+  <line class="lnb" x1="530" y1="85" x2="736" y2="110" marker-end="url(#g2)"/><line class="lnb" x1="530" y1="145" x2="736" y2="140" marker-end="url(#g2)"/>
+  <line class="lnb" x1="530" y1="200" x2="736" y2="200" marker-end="url(#g2)"/>
+  <text class="ts" x="770" y="235" text-anchor="middle">uneven output</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>repartition(n) / repartition(col)</th><th>coalesce(n)</th></tr></thead>
+    <tbody>
+      <tr><td>Shuffle</td><td>Yes (wide)</td><td>No (narrow)</td></tr>
+      <tr><td>Direction</td><td>Increase or decrease</td><td>Decrease only</td></tr>
+      <tr><td>Result</td><td>Evenly sized; by column = same key in same partition</td><td>Uneven if inputs were uneven</td></tr>
+      <tr><td>Use for</td><td>Fixing skew/too few partitions, increasing parallelism, partitioning before a <code>partitionBy</code> write</td><td>Cutting the number of output files cheaply after a filter</td></tr>
+    </tbody></table></div>
+  <div class="callout trap"><div class="lbl">The coalesce(1) trap</div>Because coalesce adds no stage boundary, Spark pushes the reduced parallelism <b>upstream</b>: <code>df.filter(...).groupBy(...).agg(...).coalesce(1).write</code> can run the whole final stage in a single task. If upstream work is heavy, <code>repartition(1)</code> is faster: the heavy work stays parallel and only the final write is single-threaded.</div>
+
+  <section id="partitions">
+    <h2>Partition sizing</h2>
+    <p>Rule of thumb: aim for roughly 100–200 MB per partition in memory and at least 2–3 tasks per core.</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="ps">Data to shuffle (GB)<input id="ps" type="number" min="1" value="500"></label>
+        <label for="pt">Target partition size (MB)<input id="pt" type="number" min="16" value="128"></label>
+        <label for="pc">Total cores in cluster<input id="pc" type="number" min="1" value="160"></label>
+      </div>
+      <div class="out" id="pout"></div>
+    </div>
+  </section>
+
+  <section id="executors">
+    <h2>Executor sizing</h2>
+    <p>Classic YARN/Kubernetes approach: about 5 cores per executor (good I/O throughput without too many threads sharing a heap), one core and ~1 GB per node left for the OS and daemons, and ~10% of memory for overhead.</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="en">Worker nodes<input id="en" type="number" min="1" value="10"></label>
+        <label for="ec">Cores per node<input id="ec" type="number" min="2" value="16"></label>
+        <label for="em">Memory per node (GB)<input id="em" type="number" min="4" value="64"></label>
+        <label for="ex">Cores per executor<input id="ex" type="number" min="1" max="16" value="5"></label>
+      </div>
+      <div class="out" id="eout"></div>
+      <p class="small muted" style="margin-bottom:0">One executor slot is subtracted for the YARN application master in cluster mode. On Databricks there is one executor per worker, so you size by instance type and worker count; the same per-core memory reasoning applies.</p>
+    </div>
+    <h3>How to choose, in an interview</h3>
+    <ul>
+      <li><b>Too-fat executors</b> (1 executor × 15 cores × 60 GB): long GC pauses, HDFS/S3 client contention.</li>
+      <li><b>Too-thin executors</b> (1 core each): no shared broadcast variables or cache, more JVM overhead, more executors to manage.</li>
+      <li><b>Memory-hungry stages</b> (big joins, wide rows): fewer cores per executor or memory-optimised instances, so each task gets more memory.</li>
+      <li><b>CPU-bound stages</b> (parsing, UDFs, compression): compute-optimised instances, more cores.</li>
+      <li><b>Variable load</b>: dynamic allocation or autoscaling with sensible min/max.</li>
+    </ul>
+  </section>
+
+  <section id="cache">
+    <h2>Cache vs persist</h2>
+    <ul>
+      <li><code>cache()</code> is <code>persist()</code> with the default level: memory-only for RDDs, memory-and-disk for DataFrames.</li>
+      <li><code>persist(StorageLevel.X)</code> lets you choose: <code>MEMORY_ONLY</code>, <code>MEMORY_AND_DISK</code>, <code>DISK_ONLY</code>, serialised variants, and <code>_2</code> replicated variants.</li>
+      <li>Caching is <b>lazy</b>: nothing is stored until an action runs. Check the <b>Storage</b> tab to see what's cached and what fraction fits.</li>
+      <li>Cache when a DataFrame is <b>reused by several actions</b> and is <b>expensive to recompute</b>. Don't cache something used once or cheap to re-read from columnar files.</li>
+      <li>Call <code>unpersist()</code> when done; cached data competes with execution memory.</li>
+      <li>Alternatives: <code>checkpoint()</code> or writing an intermediate table to truncate very long lineage in iterative jobs; on Databricks the disk cache speeds up repeated Parquet/Delta reads automatically.</li>
+    </ul>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>"Our nightly job went from 1 hour to 4 hours. Nothing changed in the code." Walk me through it.</summary><div>Compare the job in the Spark UI with a previous good run. Find which stage grew. Check input volume (did the source grow or a filter stop pruning?), task-time distribution (new hot key → skew), spill (data outgrew memory per task), file counts (small files accumulating), and the join strategy (a dimension crossed the broadcast threshold and became a sort-merge join). Fix the specific cause, then add monitoring on input size and stage duration.</div></details>
+      <details><summary>199 tasks finish in 30 s, one takes 45 min. Fix it in three ways.</summary><div>AQE skew join (if it's a sort-merge join and AQE is on), broadcast the smaller side, or salt the hot key. Also check whether the hot key is NULL or a default value that should be filtered out.</div></details>
+      <details><summary>When would you increase <code>spark.sql.shuffle.partitions</code>, and when decrease it?</summary><div>Increase when post-shuffle partitions are large (spill, OOM, long tasks); decrease when they're tiny (many short tasks, small output files). With AQE, set it high-ish and let coalescing reduce it.</div></details>
+      <details><summary>Is spill always bad?</summary><div>No. Spill means Spark survived memory pressure instead of failing. A little is fine; spill that is a large multiple of shuffle read, or that appears on every task, means partitions are too big for the memory per task.</div></details>
+      <details><summary>Your write produces 20,000 small files. Options?</summary><div>Repartition or coalesce before the write (by the partition column if using <code>partitionBy</code>), enable optimised writes or auto-compaction on Delta, run OPTIMIZE, and avoid partitioning on high-cardinality columns.</div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="spark-optimizer.html"><span>Previous · Module 3</span><b>Catalyst, joins &amp; AQE</b></a>
+    <a href="index.html"><span>Done with Spark Core</span><b>Back to the hub</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+  const SC={
+    "s-skew":{name:"Data skew",
+      see:"One or a few tasks run far longer than the rest; the stage sits at 199/200 for most of its runtime.",
+      metrics:[["Duration","2 s","3 s","4 s","5 s","38 min"],["Shuffle read","60 MB","75 MB","80 MB","90 MB","9.6 GB"],["Spill (disk)","0","0","0","0","14 GB"]],
+      why:"Rows are hashed to partitions by key. If one key (a big customer, a default value, NULL) holds a large share of the rows, all of them land in one partition and one task. It can also spill or OOM because only that task's memory is available.",
+      steps:["In the slow stage, compare max vs median for Duration and Shuffle Read Size.","Find the join or groupBy key for that stage in the SQL tab.","Count rows per key to find the hot keys:"],
+      stepCode:'df.groupBy("cust_id").count().orderBy(F.desc("count")).show(10)',
+      fix:["Filter or handle NULL / default keys separately, the most common hidden cause.","Let AQE split it (sort-merge joins only): keep spark.sql.adaptive.skewJoin.enabled=true.","Broadcast the smaller side so the large side isn't shuffled by the key at all.","Salt the hot key (works for joins and aggregations):"],
+      fixCode:`N = 16
+big   = orders.withColumn("salt", (F.rand() * N).cast("int"))
+small = customers.withColumn("salt", F.explode(F.array([F.lit(i) for i in range(N)])))
+joined = big.join(small, ["cust_id", "salt"]).drop("salt")
+
+# skewed aggregation: two-step aggregate
+partial = big.groupBy("cust_id", "salt").agg(F.sum("amount").alias("s"))
+final   = partial.groupBy("cust_id").agg(F.sum("s").alias("amount"))`,
+      say:"I confirm skew by comparing max and median task time and shuffle read in the stage metrics, then count rows per key to find the hot keys. First I check for NULL or default keys; then I rely on AQE skew-join handling or broadcast the smaller side; for skewed aggregations or when AQE can't help, I salt the key and aggregate in two steps."},
+    "s-oom":{name:"Executor OOM",
+      see:"Tasks fail with java.lang.OutOfMemoryError: Java heap space, or the container is killed (YARN: 'exceeding memory limits', Kubernetes: OOMKilled, exit code 137). Executors disappear and stages retry.",
+      metrics:[["Duration","40 s","52 s","1.1 min","1.3 min","failed ×4"],["Shuffle read","700 MB","820 MB","900 MB","1.1 GB","3.8 GB"],["GC time","2 s","3 s","4 s","9 s","6 min"]],
+      why:"Something needs more memory than one task gets: very large partitions, a skewed key, groupByKey or collect_list building huge lists, exploding arrays, a large broadcast, or Python UDF workers using memory outside the heap.",
+      steps:["Read the exact error. 'Java heap space' / 'GC overhead' = heap. 'Container killed … memoryOverhead' / exit 137 = off-heap or Python.","Check whether only a few tasks fail (skew) or all of them (partitions too big for the memory per task).","Look at GC time: high GC before the failure confirms heap pressure.","Check the SQL tab for exploding row counts after a join or explode."],
+      stepCode:"",
+      fix:["Smaller partitions: raise spark.sql.shuffle.partitions or repartition before the heavy step.","Fix skew if only some tasks fail.","Give each task more memory: fewer cores per executor, or larger executor memory.","Heap fine but container killed: raise spark.executor.memoryOverhead; reduce Python UDF memory; prefer built-ins or pandas UDFs.","Replace groupByKey / collect_list on unbounded groups with real aggregations."],
+      fixCode:`spark.conf.set("spark.sql.shuffle.partitions", 800)
+# cluster-level (set at launch):
+# spark.executor.memory=24g
+# spark.executor.memoryOverhead=4g
+# spark.executor.cores=4`,
+      say:"First I read the error to tell heap OOM from container-killed, which points to overhead or Python memory. Then I check whether all tasks or only a few fail: a few means skew, all means partitions are too big for memory per task. The fixes are more or smaller partitions, fewer cores per executor or more memory, more overhead for PySpark, and fixing skew."},
+    "s-driver":{name:"Driver OOM",
+      see:"The application dies with an OutOfMemoryError on the driver, or 'Total size of serialized results … is bigger than spark.driver.maxResultSize'. Executors were healthy.",
+      metrics:[["Executor tasks","healthy","","","",""],["Driver heap","fills to 100%","","","",""],["Last action","collect() / toPandas()","","","",""]],
+      why:"The driver is one JVM. It runs out when data is pulled to it (collect, toPandas, take with a big n), when a large table is broadcast (the driver builds the broadcast), when it lists hundreds of thousands of files, or when many jobs keep large plans and UI state.",
+      steps:["Find the last action before the crash in the driver log.","Check for collect / toPandas / broadcast() on large data.","Check how many files and partitions the job reads (listing pressure)."],
+      stepCode:"",
+      fix:["Write results to a table instead of collecting; use limit() for samples.","Lower autoBroadcastJoinThreshold or remove a broadcast hint on a big table.","Compact small files so fewer are listed.","If the driver genuinely needs more memory: spark.driver.memory, spark.driver.maxResultSize."],
+      fixCode:`# instead of
+pdf = big_df.toPandas()
+# do
+big_df.write.mode("overwrite").saveAsTable("tmp.result")
+sample = big_df.limit(1000).toPandas()`,
+      say:"Driver OOM almost always comes from pulling data to the driver with collect or toPandas, an over-large broadcast, or huge file listings. I fix the cause, writing results out and keeping broadcasts small, and only increase driver memory as a last resort."},
+    "s-spill":{name:"Disk spill",
+      see:"The stage is slow but doesn't fail. Spill (Memory) and Spill (Disk) are non-zero, often many times the shuffle read size.",
+      metrics:[["Shuffle read","1.8 GB","2.0 GB","2.1 GB","2.2 GB","2.4 GB"],["Spill (memory)","5 GB","6 GB","6.4 GB","6.8 GB","7.5 GB"],["Spill (disk)","1.1 GB","1.3 GB","1.4 GB","1.5 GB","1.7 GB"]],
+      why:"A sort, join or aggregation needed more execution memory than its task had, so Spark wrote sorted runs to local disk and merged them later. Spill (Memory) is the deserialised size of what was spilled; Spill (Disk) is the serialised size written.",
+      steps:["Divide shuffle read by tasks: here ~2 GB per task, far above 100–200 MB.","Check if spill is even (partitions too big) or concentrated (skew).","Check memory per task: execution pool ÷ cores per executor (Module 1)."],
+      stepCode:"",
+      fix:["More partitions: spark.sql.shuffle.partitions (here ~10× more), or rely on AQE with a smaller advisory size.","Fix skew if spill is concentrated in a few tasks.","More memory per task: fewer cores per executor, or memory-optimised instances.","Shrink rows: select fewer columns before the shuffle; aggregate before exploding.","Use faster local disks (NVMe) for shuffle on heavy workloads."],
+      fixCode:`spark.conf.set("spark.sql.shuffle.partitions", 2000)   # ~200 MB per partition
+spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128m")`,
+      say:"Spill means a task's sort or aggregation didn't fit in its execution memory. I look at shuffle read per task and spill size; if partitions are around 2 GB, I raise shuffle partitions so each is about 128–200 MB. If spill sits in a few tasks it's skew; otherwise I give tasks more memory with fewer cores per executor or larger instances."},
+    "s-small":{name:"Small files",
+      see:"Reading a table takes minutes before any task starts; the scan stage has tens of thousands of tasks of a few hundred milliseconds; the write produces thousands of tiny files.",
+      metrics:[["Files in table","48,000","","","",""],["Avg file size","300 KB","","","",""],["Task duration","0.2 s","0.2 s","0.3 s","0.3 s","1 s"]],
+      why:"Each file costs a listing call, an open and a footer read, which dominate when files are tiny. Causes: streaming or frequent micro-batch writes, partitionBy on high-cardinality columns, too many shuffle partitions at write time, and lots of small appends.",
+      steps:["Check file count and average size (DESCRIBE DETAIL on Delta, or list the path).","Check partitioning: thousands of partition folders with one small file each?","Check the writing job's final stage task count."],
+      stepCode:"DESCRIBE DETAIL gold.events   -- numFiles, sizeInBytes",
+      fix:["Compact: OPTIMIZE on Delta (or rewrite_data_files on Iceberg); schedule it.","Prevent at write time: optimized writes / auto-compaction, or repartition by the partition column before writing.","Partition only on low-cardinality columns (date, not customer_id); use clustering for the rest.","On read, Spark already packs small files into splits up to spark.sql.files.maxPartitionBytes (128 MB), but listing and open cost remain."],
+      fixCode:`OPTIMIZE gold.events;                         -- Delta compaction
+df.repartition("event_date").write.partitionBy("event_date").saveAsTable("gold.events")
+-- Delta table properties
+ALTER TABLE gold.events SET TBLPROPERTIES ('delta.autoOptimize.optimizeWrite'='true','delta.autoOptimize.autoCompact'='true');`,
+      say:"Small files hurt because listing, opening and footer reads dominate. I fix existing tables with compaction (OPTIMIZE) and prevent new ones at write time with optimized writes or repartitioning by the partition column, and by avoiding high-cardinality partition columns."},
+    "s-shuffle":{name:"Heavy shuffle / slow join",
+      see:"A join stage shuffles hundreds of GB. The plan shows SortMergeJoin with a table you know is small, or several Exchanges on the same key.",
+      metrics:[["Shuffle write (stage)","620 GB total","","","",""],["Join strategy","SortMergeJoin","","","",""],["Exchanges in plan","4","","","",""]],
+      why:"Both sides of a sort-merge join are shuffled and sorted. If one side is small, or filters weren't pushed down, or columns weren't pruned, most of that movement is wasted.",
+      steps:["Count Exchange nodes in the final plan (SQL tab).","Check sizes of each join input after filters: could one be broadcast?","Check PushedFilters / ReadSchema on the scans.","Look for repeated shuffles on the same key or unnecessary distinct / orderBy."],
+      stepCode:"df.explain('formatted')",
+      fix:["Broadcast the small side (hint or higher threshold).","Filter and project before the join; pre-aggregate the fact table.","Remove unnecessary distinct / orderBy / repartition.","Bucket or co-locate large tables joined repeatedly on the same key.","Keep AQE on so it can switch join strategy and coalesce partitions."],
+      fixCode:`dim_small = dims.filter("active = true").select("cust_id", "segment")
+result = (orders.select("cust_id", "amount", "dt")
+                .filter("dt >= '2026-09-01'")
+                .join(F.broadcast(dim_small), "cust_id"))`,
+      say:"I count the Exchanges in the final plan and check the size of each join input. Usually the fix is to read less (pushdown and pruning), broadcast the small side, pre-aggregate before joining, and remove accidental shuffles, with AQE left on to adapt at runtime."}
+  };
+  const order=["s-skew","s-oom","s-driver","s-spill","s-small","s-shuffle"];
+  const tabs=$("scTabs");
+  order.forEach(k=>{const b=document.createElement("button");b.textContent=SC[k].name;b.dataset.k=k;b.setAttribute("role","tab");b.onclick=()=>show(k,true);tabs.appendChild(b)});
+  function show(k,scroll){
+    const s=SC[k];if(!s)return;
+    tabs.querySelectorAll("button").forEach(b=>b.setAttribute("aria-selected",b.dataset.k===k));
+    const hasPct=s.metrics.some(r=>r[2]);
+    const tbl=hasPct
+      ?`<div class="tbl"><table><thead><tr><th>Metric</th><th class="num">Min</th><th class="num">25th</th><th class="num">Median</th><th class="num">75th</th><th class="num">Max</th></tr></thead><tbody>${s.metrics.map(r=>`<tr><td>${r[0]}</td>${r.slice(1).map((v,i)=>`<td class="num"${i===4&&k!=="s-spill"?' style="color:var(--bad);font-weight:600"':''}>${v}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+      :`<div class="tbl"><table><tbody>${s.metrics.map(r=>`<tr><td>${r[0]}</td><td class="num">${r[1]}</td></tr>`).join("")}</tbody></table></div>`;
+    $("scn").innerHTML=`<h3>What you see</h3><p>${esc(s.see)}</p>${tbl}
+      <h3>Why it happens</h3><p>${esc(s.why)}</p>
+      <h3>How to confirm</h3><ol>${s.steps.map(x=>`<li>${esc(x)}</li>`).join("")}</ol>${s.stepCode?`<pre><code>${esc(s.stepCode)}</code></pre>`:""}
+      <h3>How to fix</h3><ul>${s.fix.map(x=>`<li>${esc(x)}</li>`).join("")}</ul><pre><code>${esc(s.fixCode)}</code></pre>
+      <div class="callout say" style="margin-bottom:0"><div class="lbl">Say it in an interview</div>${esc(s.say)}</div>`;
+    if(scroll)document.getElementById("scenarios").scrollIntoView({behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
+  }
+  function fromHash(){const h=location.hash.slice(1);if(SC[h]){show(h,true);return true}return false}
+  window.addEventListener("hashchange",fromHash);
+  if(!fromHash())show("s-skew",false);
+
+  function fmt(n){return n.toLocaleString("en-US",{maximumFractionDigits:1})}
+  function pcalc(){const gb=+$("ps").value||0,mb=Math.max(1,+$("pt").value||128),c=Math.max(1,+$("pc").value||1);
+    const p=Math.ceil(gb*1024/mb),r=Math.ceil(p/c)*c;
+    $("pout").innerHTML=[[fmt(p),"partitions at target size"],[fmt(r),"rounded to a multiple of cores"],[fmt(r/c),"waves of tasks"],[fmt(gb*1024/r)+" MB","actual size per partition"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("")}
+  ["ps","pt","pc"].forEach(id=>$(id).addEventListener("input",pcalc));pcalc();
+
+  function ecalc(){const n=Math.max(1,+$("en").value||1),c=Math.max(2,+$("ec").value||2),m=Math.max(4,+$("em").value||4),x=Math.max(1,+$("ex").value||1);
+    const epn=Math.max(1,Math.floor((c-1)/x)),total=Math.max(1,n*epn-1),perExec=(m-1)/epn,heap=Math.floor(perExec/1.10),ovh=Math.max(0.384,perExec-heap);
+    $("eout").innerHTML=[[epn,"executors per node"],[total,"total executors (minus 1 for AM)"],[heap+" GB","spark.executor.memory"],[fmt(ovh)+" GB","≈ memoryOverhead"],[total*x,"total task slots"],[fmt(heap*0.6*0.5/x)+" GB","execution memory per task (approx.)"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("")}
+  ["en","ec","em","ex"].forEach(id=>$(id).addEventListener("input",ecalc));ecalc();
+
+  const KEY="de-learning-done-v1",items=[[14,"Reading the Spark UI to debug a slow job"],[15,"Reduce shuffle operations"],[16,"Data skew and how it affects a Spark job"],[17,"Salting technique for skewed joins"],[18,"OOM errors: how to analyse and resolve"],[19,"Disk spill and how to manage it"],[20,"Small-file problem and how to fix it"],[21,"Repartition vs coalesce"],[22,"Spark executor selection and optimization"],[23,"Cache vs persist and storage levels"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    $("mine").appendChild(row)});
+})();
+</script>
+</body></html>
