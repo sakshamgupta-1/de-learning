@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Hadoop and MapReduce</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="index.html" aria-current="page">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../../spark-execution.html">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">Background: Hadoop &amp; MapReduce</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Background · Overview</p>
+  <h1>Hadoop and MapReduce, and what Spark changed</h1>
+  <p class="lede">Spark was built to fix MapReduce's limits, and many of its ideas still run inside Spark today. A 10-minute refresher for the "Hadoop basics" and "what did Spark solve?" questions.</p>
+  <div class="toc">
+    <a href="#hadoop">Hadoop's three parts</a><a href="#flow">How a MapReduce job runs</a><a href="#terms">Key terms</a><a href="#spark">What Spark solved</a><a href="#lives-on">What lives on in Spark</a><a href="#say">Interview answers</a><a href="#check">Quick check</a>
+  </div>
+
+  <section id="hadoop">
+    <h2>Hadoop's three core components</h2>
+    <p>Hadoop splits the problem in three: where data is stored, who hands out machines, and how computation is expressed. Spark replaced only the third. It still commonly reads from HDFS-style storage and still runs on YARN.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Component</th><th>Role</th><th>Main pieces</th></tr></thead>
+      <tbody>
+        <tr><td><b>HDFS</b></td><td>Distributed storage: files split into large blocks, spread across machines</td><td><b>NameNode</b> holds metadata (which blocks make up a file, where they are). <b>DataNodes</b> store blocks, 128 MB by default, each replicated 3 times.</td></tr>
+        <tr><td><b>YARN</b></td><td>Resource management: decides which application gets which CPU and memory</td><td><b>ResourceManager</b> (cluster-wide), <b>NodeManager</b> (per machine), and one <b>ApplicationMaster</b> per job. Work runs in <b>containers</b>.</td></tr>
+        <tr><td><b>MapReduce</b></td><td>Processing model: express a job as a map phase and a reduce phase</td><td>Map tasks process input splits in parallel; reduce tasks aggregate their output by key.</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="flow">
+    <h2>How a MapReduce job runs: word count</h2>
+    <p>The classic example: count how often each word appears across many files.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 920 340" role="img" aria-labelledby="mrT">
+  <title id="mrT">MapReduce word count: HDFS blocks read by map tasks, combined locally, shuffled and sorted by key to reducers, written back to HDFS</title>
+  <defs>
+    <marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <text class="ts" x="80" y="24" text-anchor="middle">HDFS input</text>
+  <text class="ts" x="245" y="24" text-anchor="middle">map</text>
+  <text class="ts" x="420" y="24" text-anchor="middle">combine (optional)</text>
+  <text class="ts" x="560" y="24" text-anchor="middle">shuffle &amp; sort</text>
+  <text class="ts" x="705" y="24" text-anchor="middle">reduce</text>
+  <text class="ts" x="860" y="24" text-anchor="middle">HDFS output</text>
+
+  <rect class="bx2" x="20" y="44" width="120" height="56" rx="6"/><text class="tb" x="80" y="68" text-anchor="middle">block 1</text><text class="tm" x="80" y="88" text-anchor="middle">128 MB</text>
+  <rect class="bx2" x="20" y="124" width="120" height="56" rx="6"/><text class="tb" x="80" y="148" text-anchor="middle">block 2</text><text class="tm" x="80" y="168" text-anchor="middle">128 MB</text>
+  <rect class="bx2" x="20" y="204" width="120" height="56" rx="6"/><text class="tb" x="80" y="228" text-anchor="middle">block 3</text><text class="tm" x="80" y="248" text-anchor="middle">128 MB</text>
+
+  <rect class="bxb" x="170" y="44" width="150" height="56" rx="6"/><text class="tb" x="245" y="64" text-anchor="middle">map task 1</text><text class="tm" x="245" y="80" text-anchor="middle">(spark,1) (is,1)</text><text class="tm" x="245" y="94" text-anchor="middle">(spark,1)</text>
+  <rect class="bxb" x="170" y="124" width="150" height="56" rx="6"/><text class="tb" x="245" y="146" text-anchor="middle">map task 2</text><text class="tm" x="245" y="166" text-anchor="middle">(fast,1) (spark,1)</text>
+  <rect class="bxb" x="170" y="204" width="150" height="56" rx="6"/><text class="tb" x="245" y="226" text-anchor="middle">map task 3</text><text class="tm" x="245" y="246" text-anchor="middle">(is,1) (fast,1)</text>
+
+  <rect class="bxo" x="350" y="44" width="140" height="56" rx="6"/><text class="tm" x="420" y="77" text-anchor="middle">(spark,2) (is,1)</text>
+  <rect class="bxo" x="350" y="124" width="140" height="56" rx="6"/><text class="tm" x="420" y="157" text-anchor="middle">(fast,1) (spark,1)</text>
+  <rect class="bxo" x="350" y="204" width="140" height="56" rx="6"/><text class="tm" x="420" y="237" text-anchor="middle">(is,1) (fast,1)</text>
+  <text class="ts" x="420" y="282" text-anchor="middle">written to local disk</text>
+
+  <line class="ln dash" x1="560" y1="36" x2="560" y2="270"/>
+
+  <rect class="bxa" x="640" y="74" width="130" height="70" rx="6"/><text class="tb" x="705" y="98" text-anchor="middle">reducer 1</text><text class="tm" x="705" y="118" text-anchor="middle">fast: 2</text><text class="tm" x="705" y="134" text-anchor="middle">is: 2</text>
+  <rect class="bxa" x="640" y="174" width="130" height="56" rx="6"/><text class="tb" x="705" y="198" text-anchor="middle">reducer 2</text><text class="tm" x="705" y="218" text-anchor="middle">spark: 3</text>
+
+  <rect class="bx2" x="800" y="81" width="110" height="56" rx="6"/><text class="tm" x="855" y="114" text-anchor="middle">part-00000</text>
+  <rect class="bx2" x="800" y="174" width="110" height="56" rx="6"/><text class="tm" x="855" y="207" text-anchor="middle">part-00001</text>
+  <text class="ts" x="855" y="252" text-anchor="middle">3 replicas each</text>
+
+  <line class="ln" x1="140" y1="72" x2="166" y2="72" marker-end="url(#m1)"/>
+  <line class="ln" x1="140" y1="152" x2="166" y2="152" marker-end="url(#m1)"/>
+  <line class="ln" x1="140" y1="232" x2="166" y2="232" marker-end="url(#m1)"/>
+  <line class="ln" x1="320" y1="72" x2="346" y2="72" marker-end="url(#m1)"/>
+  <line class="ln" x1="320" y1="152" x2="346" y2="152" marker-end="url(#m1)"/>
+  <line class="ln" x1="320" y1="232" x2="346" y2="232" marker-end="url(#m1)"/>
+  <line class="lna" x1="490" y1="66" x2="636" y2="196" marker-end="url(#m2)"/>
+  <line class="lna" x1="490" y1="80" x2="636" y2="116" marker-end="url(#m2)"/>
+  <line class="lna" x1="490" y1="146" x2="636" y2="104" marker-end="url(#m2)"/>
+  <line class="lna" x1="490" y1="160" x2="636" y2="206" marker-end="url(#m2)"/>
+  <line class="lna" x1="490" y1="226" x2="636" y2="128" marker-end="url(#m2)"/>
+  <line class="lna" x1="490" y1="240" x2="636" y2="136" marker-end="url(#m2)"/>
+  <line class="ln" x1="770" y1="109" x2="796" y2="109" marker-end="url(#m1)"/>
+  <line class="ln" x1="770" y1="202" x2="796" y2="202" marker-end="url(#m1)"/>
+  <text class="ts" x="460" y="318" text-anchor="middle">Every word goes to exactly one reducer (hash of the key), so all counts for "spark" meet in reducer 2.</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <ol class="rail">
+    <li><div><b>Split.</b> The InputFormat divides input files into <b>input splits</b>, usually one per HDFS block. One map task per split, scheduled near the data where possible (data locality).</div></li>
+    <li><div><b>Read records.</b> A <b>RecordReader</b> turns the raw bytes of a split into key-value records. For text, key = byte offset, value = one line.</div></li>
+    <li><div><b>Map.</b> Your <code>map()</code> runs once per record and emits intermediate key-value pairs: here <code>(word, 1)</code>.</div></li>
+    <li><div><b>Combine, partition, sort.</b> An optional <b>Combiner</b> pre-aggregates on the map side. A <b>Partitioner</b> (hash of the key by default) picks the reducer for each key. Output is sorted and <b>spilled to the mapper's local disk</b>.</div></li>
+    <li><div><b>Shuffle.</b> Each reducer fetches its partitions from every mapper over the network and merge-sorts them by key.</div></li>
+    <li><div><b>Reduce.</b> Your <code>reduce()</code> runs once per key with all its values, and writes final output to <b>HDFS</b>, replicated 3 times.</div></li>
+  </ol>
+  <p>Anything more complex than one map and one reduce, such as a join followed by an aggregation, becomes a <b>chain of separate jobs</b>. Each job writes its full result to HDFS and the next one reads it back.</p>
+
+  <section id="terms">
+    <h2>Key terms</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Term</th><th>What it does</th><th>Worth knowing</th></tr></thead>
+      <tbody>
+        <tr><td><b>InputSplit</b></td><td>A logical chunk of input for one map task</td><td>Usually matches an HDFS block; it's a range, not a copy of the data</td></tr>
+        <tr><td><b>RecordReader</b></td><td>Turns a split's bytes into key-value records for the mapper</td><td>Handles records that cross split boundaries (a line split across two blocks is read whole by one mapper)</td></tr>
+        <tr><td><b>Combiner</b></td><td>A "mini-reducer" on each mapper's output before the shuffle</td><td>Cuts network traffic. Optional, and may run zero, one or several times, so the function must be <b>associative and commutative</b> (sum, max: yes; average: not directly)</td></tr>
+        <tr><td><b>Partitioner</b></td><td>Decides which reducer receives each key</td><td>Default is hash(key) mod reducers; a hot key overloads one reducer, the same skew problem as in Spark</td></tr>
+        <tr><td><b>Shuffle &amp; sort</b></td><td>Moves map output to reducers, grouped and sorted by key</td><td>The most expensive phase: disk, network and sorting</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="spark">
+    <h2>What Spark solved</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>MapReduce limitation</th><th>Spark's answer</th></tr></thead>
+      <tbody>
+        <tr><td>Every job writes its full result to HDFS (replicated) and the next job reads it back; iterative work (ML, graphs) pays this each iteration</td><td><b>In-memory processing</b>: intermediate data stays in executor memory, and reused data can be cached</td></tr>
+        <tr><td>Rigid map → reduce shape; complex logic needs a chain of jobs</td><td><b>General DAG</b>: one job can have many stages, and narrow steps are pipelined together</td></tr>
+        <tr><td>Each task starts a new JVM, giving high startup latency</td><td><b>Long-lived executors</b> run tasks as threads, so tasks start in milliseconds</td></tr>
+        <tr><td>Low-level, verbose Java API</td><td><b>High-level APIs</b>: DataFrames, SQL, Python, Scala, R</td></tr>
+        <tr><td>No query optimiser; performance depends on hand-written code</td><td><b>Catalyst and Tungsten</b> optimise and compile the plan</td></tr>
+        <tr><td>Batch only; separate systems for SQL, streaming, ML</td><td><b>One engine</b> for batch, SQL, streaming and ML</td></tr>
+      </tbody></table></div>
+    <div class="callout trap"><div class="lbl">Common trap: "Spark is in-memory, so it never touches disk"</div>Not true. Spark shuffles still write map output to <b>local disk</b>, just like MapReduce, and tasks spill to disk when memory runs out. The real gain is avoiding HDFS round-trips <i>between</i> steps, plus caching, pipelining and fast task start-up.</div>
+  </section>
+
+  <section id="lives-on">
+    <h2>What lives on in Spark</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>MapReduce idea</th><th>In Spark</th><th>Where we cover it</th></tr></thead>
+      <tbody>
+        <tr><td>Map phase</td><td>Narrow transformations (<code>map</code>, <code>filter</code>, <code>select</code>), pipelined in one stage</td><td><a href="../../spark-execution.html#narrow-wide">Execution</a></td></tr>
+        <tr><td>Shuffle &amp; sort</td><td>Wide transformations; an <code>Exchange</code> in the plan; a stage boundary</td><td><a href="../../spark-execution.html#narrow-wide">Execution</a></td></tr>
+        <tr><td>Combiner</td><td>Map-side combine: <code>reduceByKey</code>, and <code>partial_sum</code> before the shuffle in DataFrame plans</td><td><a href="../../spark-execution.html#rbk">reduceByKey vs groupByKey</a></td></tr>
+        <tr><td>Partitioner</td><td><code>hashpartitioning(key, n)</code>; <code>spark.sql.shuffle.partitions</code></td><td><a href="../../spark-tuning.html#partitions">Partition sizing</a></td></tr>
+        <tr><td>Data locality</td><td>Task scheduler prefers executors that hold the data</td><td><a href="../architecture/index.html#components">Architecture</a></td></tr>
+        <tr><td>YARN containers</td><td>Spark executors run in YARN containers (or Kubernetes pods)</td><td><a href="../architecture/index.html#memory">Executor memory</a></td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Hadoop components</div>"HDFS stores data as replicated 128 MB blocks, with a NameNode for metadata and DataNodes for blocks. YARN allocates resources through a ResourceManager, per-node NodeManagers and a per-job ApplicationMaster. MapReduce is the processing model: map tasks over input splits, a shuffle and sort by key, then reduce tasks."</div>
+    <div class="callout say"><div class="lbl">What Spark solved</div>"MapReduce writes every job's output to HDFS and forces a rigid map-then-reduce shape, so multi-step and iterative work is slow. Spark keeps intermediate data in memory, runs a whole DAG of stages in one job, reuses long-lived executors, and adds high-level APIs with an optimiser. It still writes shuffle files to local disk, though, so it isn't purely in-memory."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>What are the three core components of Hadoop?</summary><div>HDFS (storage), YARN (resource management) and MapReduce (processing).</div></details>
+      <details><summary>What does a RecordReader do?</summary><div>It converts the bytes of an input split into key-value records for the mapper, for example byte offset → line for text files, and handles records that cross split boundaries.</div></details>
+      <details><summary>Can you use a Combiner to compute an average?</summary><div>Not directly: an average of averages is wrong when groups differ in size. Emit (sum, count) pairs instead; those combine correctly, and the reducer divides at the end. The same trick applies to Spark's <code>aggregateByKey</code>.</div></details>
+      <details><summary>Name three MapReduce limitations Spark addressed.</summary><div>HDFS writes between every job, the rigid two-phase model that forces job chains, and JVM start-up per task. Also: no optimiser, a verbose API, and batch-only processing.</div></details>
+      <details><summary>Does Spark ever write intermediate data to disk?</summary><div>Yes. Shuffle output always goes to the executors' local disks, and tasks spill to disk under memory pressure. What Spark avoids is writing every intermediate result to replicated HDFS.</div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this topic</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../index.html"><span>Back</span><b>Spark Core</b></a>
+    <a href="../architecture/index.html"><span>Next · Module 1</span><b>Architecture &amp; memory</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const KEY="de-learning-done-v1",items=[[24,"Hadoop & MapReduce basics, and what Spark improved"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

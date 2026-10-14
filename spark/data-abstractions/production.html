@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark and pandas Pitfalls</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="index.html" aria-current="page">2 · RDD &amp; DataFrames</a>
+    <a href="../../spark-execution.html">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">RDD, DataFrame, Dataset &amp; pandas</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 2 · Production issues</p>
+  <h1>Crossing between Spark and pandas</h1>
+  <p class="lede">Most problems in this area happen where data moves between worlds: Spark to pandas, JVM to Python, DataFrame to RDD. Each issue below follows the same path: symptom, why, how to confirm, fix, prevention, interview answer.</p>
+  <div class="toc">
+    <a href="#topandas">toPandas OOM</a><a href="#arrow">Silent Arrow fallback</a><a href="#python-udf">Slow Python UDFs</a><a href="#rdd-roundtrip">RDD round-trips</a><a href="#pandas-on-spark">pandas API surprises</a><a href="#spark-connect">RDD code on Spark Connect</a><a href="#interview">Interview questions</a>
+  </div>
+
+  <section id="topandas">
+    <h2>toPandas() runs the driver out of memory</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>java.lang.OutOfMemoryError: Java heap space          (driver)
+Total size of serialized results of 512 tasks (1024.0 MiB)
+is bigger than spark.driver.maxResultSize (1024.0 MiB)</code></pre>
+      <p>Or the notebook hangs for minutes and then the Python process is killed.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li><code>toPandas()</code> pulls <b>every row</b> to the driver, then builds a pandas DataFrame there. Data exists in the JVM, in transit and in pandas at the same moment, so peak memory is a multiple of the data size.</li>
+        <li>It's often called "just to look" at a table, or on data that was small in development and grew in production.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>The failure is in the driver log, right after the <code>toPandas</code> call.</li>
+        <li>Check the result size first: <code>df.count()</code> and the number of columns.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Aggregate or filter in Spark first; convert only the small result.</li>
+        <li>For a look at the data, use <code>df.limit(1000).toPandas()</code> or <code>df.show()</code>.</li>
+        <li>For handing data to another system, write it to a table or files instead.</li>
+        <li>Enable Arrow (<code>spark.sql.execution.arrow.pyspark.enabled=true</code>). It cuts conversion time and overhead, but every row still lands on the driver.</li>
+      </ul>
+      <h3>Prevent</h3>
+      <ul><li>Team rule: <code>toPandas()</code> only after an aggregation or a <code>limit</code>, never on raw tables.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"toPandas collects the whole DataFrame to the driver and builds a pandas copy, so it's a driver OOM waiting to happen on large data. I reduce the data in Spark first, convert only small results with Arrow enabled, and write anything big to storage instead."</div>
+    </div>
+  </section>
+
+  <section id="arrow">
+    <h2>Arrow silently falls back to the slow path</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>UserWarning: toPandas attempted Arrow optimization because
+'spark.sql.execution.arrow.pyspark.enabled' is set to true; however,
+failed by the reason below: ...
+Attempting non-optimization as
+'spark.sql.execution.arrow.pyspark.fallback.enabled' is set to true.</code></pre>
+      <p>The conversion still works, just many times slower, and the warning is easy to miss in a job log.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>A column type Arrow can't convert in your Spark version (some nested or complex types), or a version mismatch between PySpark, PyArrow and pandas.</li>
+        <li>Fallback is on by default, so Spark quietly switches to row-by-row conversion instead of failing.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Search driver logs for <code>attempted Arrow optimization</code>.</li>
+        <li>Re-run with fallback disabled to see the real error:
+<pre><code>spark.conf.set("spark.sql.execution.arrow.pyspark.fallback.enabled", "false")</code></pre></li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Cast or flatten the unsupported column (for example <code>to_json</code> on a complex struct) before converting.</li>
+        <li>Align PyArrow and pandas with the versions your Spark release supports.</li>
+      </ul>
+      <h3>Prevent</h3>
+      <ul><li>Disable fallback in tests and CI so incompatibilities fail loudly there instead of slowing production.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Arrow makes Spark-to-pandas conversion columnar and fast, but by default Spark falls back silently when Arrow can't handle a type. I turn fallback off in testing so those cases fail visibly, then fix the column types."</div>
+    </div>
+  </section>
+
+  <section id="python-udf">
+    <h2>Slow Python UDFs</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>No error; the job is just slow. The stage running the UDF dominates the runtime, executor CPU sits in Python processes, and the plan shows a <code>BatchEvalPython</code> node (plain Python UDF) or <code>ArrowEvalPython</code> (pandas UDF).</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>A plain Python UDF processes <b>one row at a time</b>: each row is serialised in the JVM, sent to a Python worker, processed and sent back.</li>
+        <li>Catalyst can't see inside the UDF, so filters that depend on its output can't be pushed down.</li>
+        <li>Python workers also use memory outside the JVM heap, which can lead to "container killed" errors (see <a href="../architecture/production.html#container-killed">Module 1</a>).</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li><code>df.explain()</code> shows <code>BatchEvalPython</code>.</li>
+        <li>Compare stage time with the UDF replaced by a no-op or built-in.</li>
+      </ol>
+      <h3>Fix</h3>
+      <ul>
+        <li>Rewrite with built-in functions where possible: the biggest win.</li>
+        <li>Otherwise use a <b>pandas UDF</b>: Arrow batches and vectorised pandas or NumPy code.</li>
+        <li>On Spark 3.5+, an <b>Arrow-optimised Python UDF</b> (<code>@udf(useArrow=True)</code>) keeps row-wise code but speeds up data transfer.</li>
+        <li>Apply UDFs after filtering, so fewer rows reach Python.</li>
+      </ul>
+<pre><code><span class="muted"># before: row-at-a-time Python UDF</span>
+@udf("string")
+def tier(amount): return "high" if amount > 1000 else "low"
+
+<span class="muted"># after: built-in, stays in the JVM and is optimised</span>
+df.withColumn("tier", F.when(F.col("amount") > 1000, "high").otherwise("low"))</code></pre>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Plain Python UDFs serialise every row to Python and back, and they're opaque to Catalyst. I replace them with built-ins first; if I really need Python, I use pandas UDFs for vectorised Arrow batches, and I filter before the UDF so less data crosses into Python."</div>
+    </div>
+  </section>
+
+  <section id="rdd-roundtrip">
+    <h2>Losing optimisation with DataFrame → RDD → DataFrame</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+      <p>A pipeline that does <code>df.rdd.map(…).toDF()</code> in the middle is much slower than expected, reads far more data than its inputs suggest, and its plan shows full scans with no <code>PushedFilters</code>.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li>Catalyst optimises <b>up to</b> the <code>.rdd</code> call and <b>after</b> the <code>toDF()</code>, but can't optimise across it. Filters later in the pipeline can't be pushed back into the scan.</li>
+        <li>Rows are converted from Tungsten's binary format into Python <code>Row</code> objects and back.</li>
+        <li><code>toDF()</code> without a schema samples rows to infer types: an extra job, and sometimes the wrong types.</li>
+      </ul>
+      <h3>Fix</h3>
+      <ul>
+        <li>Express the logic with built-ins, a pandas UDF or <code>mapInPandas</code> (see <a href="examples.html#own-function">Examples</a>).</li>
+        <li>If an RDD step truly can't be avoided, filter and select columns <b>before</b> <code>.rdd</code>, and pass an explicit schema to <code>createDataFrame</code>.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Dropping to an RDD creates an optimisation barrier: Catalyst can't push filters or prune columns across it, and every row is converted to Python objects. I keep pipelines in DataFrames and use pandas UDFs or mapInPandas for custom logic."</div>
+    </div>
+  </section>
+
+  <section id="pandas-on-spark">
+    <h2>pandas API on Spark surprises</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>ValueError: Cannot combine the series or dataframe because it comes from
+a different dataframe. In order to allow this operation, enable
+'compute.ops_on_diff_frames' option.</code></pre>
+      <p>Or code that was instant in pandas runs very slowly, or a step quietly moves all data into one partition.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li><b>The index is expensive.</b> pandas assumes a row order and index; Spark has neither natively. Creating a sequential default index, or aligning two DataFrames by index, needs extra passes or joins.</li>
+        <li><b>Combining two different DataFrames</b> requires a join on the index, which is disabled by default because it's costly.</li>
+        <li><b>Some operations don't distribute well</b>: anything needing a global row order, or positional access like <code>iloc</code> on big data.</li>
+      </ul>
+      <h3>Fix</h3>
+      <ul>
+        <li>Set <code>index_col</code> when reading or converting, or use <code>compute.default_index_type = "distributed"</code> when consecutive index values don't matter.</li>
+        <li>Join explicitly on a key column instead of relying on index alignment; enable <code>compute.ops_on_diff_frames</code> only when you accept the cost.</li>
+        <li>Switch to the Spark DataFrame API (<code>psdf.to_spark()</code>) for heavy steps.</li>
+      </ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"The pandas API on Spark gives pandas syntax on distributed data, but pandas assumes an ordered index, which is expensive to provide at scale. I set an index column, avoid combining different frames by index, and switch to the DataFrame API for heavy transformations."</div>
+    </div>
+  </section>
+
+  <section id="spark-connect">
+    <h2>RDD code fails on Spark Connect and serverless</h2>
+    <div class="issue">
+      <h3>Symptom</h3>
+<pre class="err"><code>[JVM_ATTRIBUTE_NOT_SUPPORTED] Attribute `sparkContext` is not supported
+in Spark Connect as it depends on the JVM.
+
+[NOT_IMPLEMENTED] rdd() is not implemented.</code></pre>
+      <p class="small muted">Exact messages vary by Spark and Databricks version.</p>
+      <h3>Why it happens</h3>
+      <p>With <b>Spark Connect</b> (Spark 3.4+), your Python code is a thin client that sends unresolved plans to a remote Spark server. There's no JVM in your process, so JVM-bound APIs such as <code>sparkContext</code>, RDDs and <code>df.rdd</code> aren't available. Databricks serverless and shared-access compute work this way.</p>
+      <h3>Fix</h3>
+      <ul>
+        <li>Rewrite RDD logic with DataFrame operations, built-ins, pandas UDFs or <code>mapInPandas</code>.</li>
+        <li>Replace <code>sc.broadcast</code> with broadcast joins, <code>sc.parallelize</code> with <code>spark.createDataFrame</code>, and accumulators with aggregations.</li>
+      </ul>
+      <h3>Prevent</h3>
+      <ul><li>Treat RDD usage as technical debt in new code, and flag it in code review.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Spark Connect separates the client from the Spark driver, so APIs that need the JVM, like sparkContext and RDDs, don't exist on the client. That's how Databricks serverless works, so I write new code purely against the DataFrame API."</div>
+    </div>
+  </section>
+
+  <section id="interview">
+    <h2>Common interview questions</h2>
+    <div class="qa">
+      <details><summary>Compare RDD, DataFrame and Dataset.</summary><div>RDD: distributed objects with arbitrary functions, no schema, no optimiser. DataFrame: named, typed columns, optimised by Catalyst and stored compactly by Tungsten; available in all languages. Dataset: the typed JVM version with compile-time checks; a DataFrame is Dataset[Row]. Default to DataFrames; Datasets suit typed Scala code; RDDs only for low-level needs.</div></details>
+      <details><summary>Why are DataFrames faster than RDDs, especially in PySpark?</summary><div>Catalyst understands the query, so it pushes down filters, prunes columns and picks join strategies; Tungsten uses compact binary rows and generated code. In PySpark, RDD lambdas also pickle every row to Python workers and back, while DataFrame operations stay in the JVM.</div></details>
+      <details><summary>When would you still use an RDD?</summary><div>Unstructured data needing custom parsing, low-level partitioning control, or legacy code. Even then, pandas UDFs or mapInPandas often do the job better, and RDDs don't work on Spark Connect.</div></details>
+      <details><summary>What's the difference between a Spark DataFrame and a pandas DataFrame?</summary><div>Spark: distributed, lazy, immutable, no index, scales to any size. pandas: single machine, eager, mutable, indexed, limited by one machine's memory.</div></details>
+      <details><summary>What happens when you call toPandas()?</summary><div>Spark runs the plan, collects every row to the driver, and builds a pandas DataFrame there. With Arrow enabled the transfer is columnar and much faster, but the full data still has to fit in driver memory.</div></details>
+      <details><summary>What is Apache Arrow and why does Spark use it?</summary><div>A columnar in-memory format shared by the JVM and Python. Spark uses it to move data between them in batches without per-row serialisation: in toPandas, createDataFrame from pandas, and pandas UDFs.</div></details>
+      <details><summary>pandas UDF vs pandas API on Spark: what's the difference?</summary><div>A pandas UDF runs your own pandas function on executors over batches or groups of a Spark DataFrame. The pandas API on Spark is a pandas-compatible interface whose calls are translated into Spark plans; you don't write per-batch functions at all.</div></details>
+      <details><summary>Are Spark DataFrames mutable?</summary><div>No. Every transformation returns a new DataFrame with a longer plan; the original is unchanged. Even the pandas API on Spark, which looks mutable, creates new plans underneath.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../../spark-execution.html"><span>Next · Module 3</span><b>Execution flow &amp; lazy evaluation</b></a>
+  </nav>
+</div></main>
+</body></html>

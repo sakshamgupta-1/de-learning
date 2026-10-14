@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RDD vs DataFrame Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="index.html" aria-current="page">2 · RDD &amp; DataFrames</a>
+    <a href="../../spark-execution.html">3 · Execution</a>
+    <a href="../../spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">RDD, DataFrame, Dataset &amp; pandas</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 2 · Examples</p>
+  <h1>One query, six ways</h1>
+  <p class="lede">The same question answered with each API, so you can see exactly what Spark can and can't optimise. Then every conversion between them, and better alternatives to dropping down to RDDs.</p>
+  <div class="toc">
+    <a href="#six-ways">Six ways</a><a href="#plans">What Spark sees</a><a href="#conversions">Conversions</a><a href="#own-function">"I need my own function"</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="six-ways">
+    <h2>The question</h2>
+    <p>An <code>orders</code> table in Parquet with 42 columns, including <code>cust_id</code>, <code>segment</code>, <code>country</code> and <code>amount</code>. <b>Total order amount per customer segment, for the UAE only.</b></p>
+    <div class="seg" role="tablist" id="tabs">
+      <button role="tab" aria-selected="true" data-k="rdd">RDD</button>
+      <button role="tab" aria-selected="false" data-k="df">DataFrame</button>
+      <button role="tab" aria-selected="false" data-k="sql">Spark SQL</button>
+      <button role="tab" aria-selected="false" data-k="ds">Dataset (Scala)</button>
+      <button role="tab" aria-selected="false" data-k="pd">pandas</button>
+      <button role="tab" aria-selected="false" data-k="ps">pandas API on Spark</button>
+    </div>
+
+    <div class="scn" id="p-rdd" role="tabpanel">
+      <div class="meta" style="margin-top:0"><span class="chip">runs on the cluster</span><span class="chip bad">not optimised</span><span class="chip bad">Python per row</span></div>
+<pre><code>totals = (spark.read.parquet("s3://lake/orders").rdd       <span class="muted"># RDD of Row objects</span>
+          .filter(lambda r: r.country == "AE")
+          .map(lambda r: (r.segment, r.amount))
+          .reduceByKey(lambda a, b: a + b))                 <span class="muted"># map-side combine, then shuffle</span>
+totals.collect()</code></pre>
+      <ul>
+        <li>The scan reads <b>all 42 columns</b> of every row: Spark can't see that the lambdas only use three.</li>
+        <li>The filter <b>isn't pushed down</b>, so no Parquet row groups are skipped.</li>
+        <li>Every row is pickled, sent to a Python worker, filtered and mapped there, then sent back.</li>
+        <li><code>reduceByKey</code> still combines on the map side before the shuffle, so at least that part is efficient.</li>
+      </ul>
+    </div>
+
+    <div class="scn" id="p-df" role="tabpanel" hidden>
+      <div class="meta" style="margin-top:0"><span class="chip">runs on the cluster</span><span class="chip ok">fully optimised</span><span class="chip ok">stays in the JVM</span></div>
+<pre><code>from pyspark.sql import functions as F
+
+out = (spark.read.parquet("s3://lake/orders")
+       .filter(F.col("country") == "AE")
+       .groupBy("segment")
+       .agg(F.sum("amount").alias("total")))
+out.show()</code></pre>
+      <ul>
+        <li>Reads only <b>3 columns</b> (<code>country</code>, <code>segment</code>, <code>amount</code>).</li>
+        <li>The filter is <b>pushed into the Parquet reader</b>, which skips row groups whose statistics rule out "AE".</li>
+        <li>A <code>partial_sum</code> runs before the shuffle, and the whole stage is compiled to one generated function.</li>
+        <li>No Python involved at run time: Python only described the plan.</li>
+      </ul>
+    </div>
+
+    <div class="scn" id="p-sql" role="tabpanel" hidden>
+      <div class="meta" style="margin-top:0"><span class="chip">runs on the cluster</span><span class="chip ok">fully optimised</span><span class="chip">identical plan to DataFrame</span></div>
+<pre><code>spark.read.parquet("s3://lake/orders").createOrReplaceTempView("orders")
+
+out = spark.sql("""
+    SELECT segment, SUM(amount) AS total
+    FROM orders
+    WHERE country = 'AE'
+    GROUP BY segment
+""")</code></pre>
+      <ul>
+        <li>Parses into the same logical plan as the DataFrame version, so <code>out.explain()</code> prints the same physical plan.</li>
+        <li>Pick SQL or the DataFrame API for readability and team habits, not performance.</li>
+      </ul>
+    </div>
+
+    <div class="scn" id="p-ds" role="tabpanel" hidden>
+      <div class="meta" style="margin-top:0"><span class="chip">runs on the cluster</span><span class="chip warn">typed lambdas partly opaque</span><span class="chip ok">compile-time types</span></div>
+<pre><code>import spark.implicits._
+case class Order(cust_id: Long, segment: String, country: String, amount: Double)
+
+val ds = spark.read.parquet("s3://lake/orders").as[Order]
+
+<span class="muted">// typed style: compile-time checked, but lambdas are opaque to Catalyst</span>
+val typed = ds.filter(_.country == "AE")
+              .groupByKey(_.segment)
+              .mapValues(_.amount)
+              .reduceGroups(_ + _)
+
+<span class="muted">// column style on the same Dataset: fully optimised</span>
+val fast = ds.filter($"country" === "AE")
+             .groupBy("segment")
+             .agg(sum("amount").as("total"))</code></pre>
+      <ul>
+        <li>The <b>typed</b> version catches mistakes like <code>_.countrry</code> at compile time, but each row is deserialised into an <code>Order</code> object for the lambda, and the filter can't be pushed down.</li>
+        <li>The <b>column</b> version gets the full Catalyst treatment. Many teams use typed Datasets at pipeline boundaries and column expressions inside.</li>
+      </ul>
+    </div>
+
+    <div class="scn" id="p-pd" role="tabpanel" hidden>
+      <div class="meta" style="margin-top:0"><span class="chip">one machine</span><span class="chip">eager</span><span class="chip bad">must fit in memory</span></div>
+<pre><code>import pandas as pd
+
+pdf = pd.read_parquet("orders.parquet", columns=["segment", "country", "amount"])
+out = pdf[pdf["country"] == "AE"].groupby("segment")["amount"].sum()</code></pre>
+      <ul>
+        <li>Each line runs immediately. No cluster, no plan, no shuffle: fastest of all <b>when the data fits</b> in one machine's memory.</li>
+        <li>Selecting columns on read matters here: pandas has no optimiser to do it for you.</li>
+        <li>Good fit for small reference data, results after Spark has aggregated, or feeding plotting and ML libraries.</li>
+      </ul>
+    </div>
+
+    <div class="scn" id="p-ps" role="tabpanel" hidden>
+      <div class="meta" style="margin-top:0"><span class="chip">runs on the cluster</span><span class="chip ok">optimised</span><span class="chip">pandas syntax</span></div>
+<pre><code>import pyspark.pandas as ps
+
+psdf = ps.read_parquet("s3://lake/orders")
+out = psdf[psdf["country"] == "AE"].groupby("segment")["amount"].sum()
+out.head()                                    <span class="muted"># runs a Spark job</span></code></pre>
+      <ul>
+        <li>The same syntax as pandas, but each call is translated into a Spark DataFrame plan and runs distributed.</li>
+        <li>It keeps a pandas-style <b>index</b>. Creating a sequential default index costs an extra pass over the data; pass <code>index_col</code>, or set <code>compute.default_index_type</code> to <code>distributed</code> when you don't need consecutive values.</li>
+        <li>Useful for moving existing pandas code to big data with few changes. For new pipelines, the DataFrame API is clearer about what Spark does.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="plans">
+    <h2>What Spark sees</h2>
+    <p>The real difference shows up in the physical plan. This is the DataFrame (or SQL) version's scan, from <code>out.explain()</code>:</p>
+<pre><code>+- FileScan parquet [segment,country,amount]
+     PushedFilters: [IsNotNull(country), EqualTo(country,AE)]
+     ReadSchema: struct&lt;segment:string,country:string,amount:double&gt;</code></pre>
+    <p>The RDD version has no equivalent: the scan reads the full 42-column schema with no pushed filters, and the filter shows up only as Python work inside the stage. You can see its lineage with <code>totals.toDebugString()</code>, but it has no optimiser output to read.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Version</th><th class="num">Columns read</th><th>Filter pushed down</th><th>Where the logic runs</th></tr></thead>
+      <tbody>
+        <tr><td>RDD</td><td class="num">42</td><td>No</td><td>Python workers, row by row</td></tr>
+        <tr><td>DataFrame / SQL</td><td class="num">3</td><td>Yes</td><td>JVM, generated code</td></tr>
+        <tr><td>Dataset, typed lambdas</td><td class="num">4</td><td>No</td><td>JVM, per-object lambdas</td></tr>
+        <tr><td>Dataset, column style</td><td class="num">3</td><td>Yes</td><td>JVM, generated code</td></tr>
+        <tr><td>pandas</td><td class="num">3 (you chose)</td><td>n/a</td><td>One Python process</td></tr>
+        <tr><td>pandas API on Spark</td><td class="num">3</td><td>Yes</td><td>JVM, generated code</td></tr>
+      </tbody></table></div>
+    <p class="small muted">The typed Dataset reads the four fields of <code>Order</code>: the class tells Spark which columns are needed, but not which rows can be skipped.</p>
+  </section>
+
+  <section id="conversions">
+    <h2>Moving between them</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>From → to</th><th>Code</th><th>Watch out</th></tr></thead>
+      <tbody>
+        <tr><td>Spark DataFrame → pandas</td><td><code>df.toPandas()</code></td><td>Collects <b>every row to the driver</b>. Enable Arrow; use only on small results.</td></tr>
+        <tr><td>pandas → Spark DataFrame</td><td><code>spark.createDataFrame(pdf)</code></td><td>The data starts on the driver. Arrow speeds it up; pass a schema to control types.</td></tr>
+        <tr><td>DataFrame → RDD</td><td><code>df.rdd</code></td><td>An RDD of <code>Row</code> objects; optimisation stops here. Not available on Spark Connect.</td></tr>
+        <tr><td>RDD → DataFrame</td><td><code>rdd.toDF(["seg", "total"])</code> or <code>spark.createDataFrame(rdd, schema)</code></td><td>Without a schema, Spark samples rows to infer types. Give one.</td></tr>
+        <tr><td>DataFrame → pandas API on Spark</td><td><code>df.pandas_api()</code></td><td>Adds a default index (see above). Spark 3.2+.</td></tr>
+        <tr><td>pandas API on Spark → DataFrame</td><td><code>psdf.to_spark(index_col="id")</code></td><td>The index is dropped unless you keep it with <code>index_col</code>.</td></tr>
+        <tr><td>pandas API on Spark → pandas</td><td><code>psdf.to_pandas()</code></td><td>Same as <code>toPandas()</code>: everything to the driver.</td></tr>
+        <tr><td>DataFrame ↔ Dataset (Scala)</td><td><code>df.as[Order]</code> / <code>ds.toDF()</code></td><td>Needs <code>import spark.implicits._</code> for the encoder.</td></tr>
+      </tbody></table></div>
+<pre><code><span class="muted"># Arrow makes Spark ↔ pandas conversion much faster (off by default in open-source Spark)</span>
+spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+small = big_df.filter("country = 'AE'").groupBy("segment").count().toPandas()</code></pre>
+  </section>
+
+  <section id="own-function">
+    <h2>"I need my own Python function"</h2>
+    <p>The usual reason people drop to RDDs. Try these in order:</p>
+    <ol class="rail">
+      <li><div><b>Built-in functions first.</b> Most logic is expressible with <code>pyspark.sql.functions</code>: <code>when</code>, <code>regexp_extract</code>, <code>transform</code> on arrays, <code>from_json</code>, window functions. Fastest, and fully optimised.
+<pre><code>df.withColumn("amount_with_tax", F.col("amount") * 1.05)</code></pre></div></li>
+      <li><div><b>pandas UDF</b> for column-wise logic that needs Python libraries. Data moves in Arrow batches and runs vectorised.
+<pre><code>import pandas as pd
+from pyspark.sql.functions import pandas_udf
+
+@pandas_udf("double")
+def with_tax(amount: pd.Series) -> pd.Series:
+    return amount * 1.05
+
+df.withColumn("amount_with_tax", with_tax("amount"))</code></pre></div></li>
+      <li><div><b><code>mapInPandas</code></b> when you need whole batches of rows, for example scoring a model, without grouping.
+<pre><code>def score(batches):
+    for pdf in batches:                    <span class="muted"># an iterator of pandas DataFrames</span>
+        pdf["score"] = model.predict(pdf[["amount"]])
+        yield pdf
+
+df.mapInPandas(score, schema="cust_id long, amount double, score double")</code></pre></div></li>
+      <li><div><b><code>applyInPandas</code></b> when the logic needs a whole group at once (per-customer models, custom time-series fills). Watch group sizes: each group must fit in one Python worker. See <a href="../architecture/production.html#pandas-udf">Pandas UDF OOM</a>.</div></li>
+    </ol>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>Why does the RDD version read all 42 columns?</summary><div>Spark can't look inside the Python lambdas to see which fields they use, so it must materialise whole rows. DataFrame expressions name their columns, so Catalyst prunes the rest.</div></details>
+      <details><summary>Would rewriting the DataFrame query in SQL make it faster?</summary><div>No. Same logical plan, same optimiser, same physical plan.</div></details>
+      <details><summary>When is plain pandas the best choice in a Spark project?</summary><div>When the data comfortably fits on one machine: small lookup tables, results already aggregated by Spark, local exploration, or handing data to plotting and ML libraries that need pandas.</div></details>
+      <details><summary>You need a Python library function applied to each row of a 2 TB table. What do you use?</summary><div>A pandas UDF (or <code>mapInPandas</code> if you need whole rows), not an RDD map. Arrow batches and vectorised execution are much faster than row-by-row pickling, and the rest of the plan stays optimised.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const tabs=document.querySelectorAll("#tabs button");
+  tabs.forEach(b=>b.addEventListener("click",()=>{
+    tabs.forEach(x=>{const on=x===b;x.setAttribute("aria-selected",on);document.getElementById("p-"+x.dataset.k).hidden=!on});
+  }));
+})();
+</script>
+</body></html>

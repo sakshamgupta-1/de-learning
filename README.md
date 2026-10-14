@@ -4,7 +4,7 @@ An interactive study hub for **data engineering interview preparation**, aimed a
 
 It's a small static website: plain HTML, CSS and JavaScript, with no build step and no backend. It has two parts:
 
-- **Topic tracker** (`index.html`): 75 interview topics in seven areas. Readers tick topics off as they learn them, and progress is saved in their own browser.
+- **Topic tracker** (`index.html`): 78 interview topics in seven areas. Readers tick topics off as they learn them, and progress is saved in their own browser.
 - **Learning paths**: interactive pages that teach one area in depth, with diagrams, worked examples, failure scenarios, debug flows and ready-to-use interview answers.
 
 ## Why this repo exists
@@ -18,10 +18,12 @@ The hub started as a personal prep tool and is now open to friends for review an
 | `index.html` | Hub: topic tracker and list of learning paths |
 | `spark/index.html` | Spark Core path: list of modules |
 | `spark/architecture/` | Spark Core module 1: overview, deep dive (memory internals, dynamic allocation, speculation) and production memory failures |
+| `spark/mapreduce/` | Spark Core background: Hadoop & MapReduce, and what Spark solved |
+| `spark/data-abstractions/` | Spark Core module 2: RDD vs DataFrame vs Dataset vs pandas, with examples and production issues |
 | `spark-architecture.html` | Redirect to `spark/architecture/` |
-| `spark-execution.html` | Spark Core module 2: spark-submit flow, lazy evaluation, narrow vs wide, stages |
-| `spark-optimizer.html` | Spark Core module 3: Catalyst, pushdown and pruning, explain(), joins, AQE, UDFs |
-| `spark-tuning.html` | Spark Core module 4: debug flow, six failure scenarios, shuffle, partition and executor sizing |
+| `spark-execution.html` | Spark Core module 3: spark-submit flow, lazy evaluation, narrow vs wide, stages |
+| `spark-optimizer.html` | Spark Core module 4: Catalyst, pushdown and pruning, explain(), joins, AQE, UDFs |
+| `spark-tuning.html` | Spark Core module 5: debug flow, six failure scenarios, shuffle, partition and executor sizing |
 | `styles.css` | Shared design tokens and components (light and dark themes) |
 | `scripts/check.py` | Automated checks run on every pull request |
 | `AGENTS.md` | Conventions for AI coding agents (and humans) editing the site |
@@ -31,7 +33,7 @@ The hub started as a personal prep tool and is now open to friends for review an
 
 | Area | Topics | Learning path |
 | --- | --- | --- |
-| Spark core | 24 | Available (4 modules) |
+| Spark core | 27 | Available (background + 5 modules) |
 | Structured Streaming | 10 | Planned next |
 | Delta Lake & Databricks | 16 | Planned |
 | Iceberg & table formats | 5 | Planned |
