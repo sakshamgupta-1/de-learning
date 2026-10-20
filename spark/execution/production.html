@@ -31,7 +31,7 @@
   <h1>When lazy execution bites</h1>
   <p class="lede">Problems that come from how Spark plans and runs jobs, rather than from memory or data size. Each follows the same path: symptom, why, how to confirm, fix, prevention, interview answer.</p>
   <div class="toc">
-    <a href="#recompute">Recomputed lineage</a><a href="#debug-actions">Leftover debug actions</a><a href="#huge-plans">Huge plans from loops</a><a href="#fetch-failed">Fetch failures</a><a href="#aborted">Job aborted after retries</a><a href="#late-errors">Errors far from the cause</a><a href="#interview">Interview questions</a>
+    <a href="#recompute">Recomputed lineage</a><a href="#debug-actions">Leftover debug actions</a><a href="#huge-plans">Huge plans from loops</a><a href="#fetch-failed">Fetch failures</a><a href="#aborted">Job aborted after retries</a><a href="#late-errors">Errors far from the cause</a><a href="#file-header-case">Case study: header values on the driver</a><a href="#interview">Interview questions</a>
   </div>
 
   <section id="recompute">
@@ -174,6 +174,103 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
     </div>
   </section>
 
+  <section id="file-header-case">
+    <h2>Case study: per-file header values read on the driver</h2>
+    <div class="issue">
+      <h3>The setup</h3>
+      <p>An Auto Loader stream (<code>readStream</code>, CSV) loads files from S3 into a Bronze table. The framework adds a <b>file-generated timestamp</b> column, normally parsed from the file name (<code>&lt;source_id&gt;_&lt;object&gt;_&lt;yyyyMMddHHmmss&gt;.csv</code>). One source instead puts the timestamp as the <b>last field of the header line</b>. The first implementation used a Python function on the <b>driver</b> to open each file in the S3 location, read its first line, build a file → timestamp map, broadcast it, and join it to the Auto Loader DataFrame.</p>
+      <h3>Symptom</h3>
+      <p>Runtime grows steadily as the bucket accumulates files, even though daily volume is flat. The driver is busy while executors sit idle at the start of every batch.</p>
+      <h3>Why it happens</h3>
+      <ul>
+        <li><b>Serial work on one machine.</b> The driver lists the location and opens files one after another; executors don't help.</li>
+        <li><b>Cost tracks the total file count, not new files.</b> Re-reading headers of files already ingested makes every batch slower than the last.</li>
+        <li><b>Every file is read twice:</b> once for the header, once by Auto Loader for the data.</li>
+        <li><b>A growing broadcast</b> map is rebuilt and shipped to every executor each batch.</li>
+        <li>In <b>directory listing mode</b>, Auto Loader's own discovery also slows as the location grows.</li>
+      </ul>
+      <h3>How to confirm</h3>
+      <ol>
+        <li>Spark UI: a long gap before the first job of each batch with no running tasks (driver-only work).</li>
+        <li>Driver logs or profiling show S3 calls proportional to total files, not to the batch's new files.</li>
+        <li>Batch duration plotted against total file count rises in a straight line.</li>
+      </ol>
+
+      <h3>Try the numbers</h3>
+      <div class="calc" style="margin-top:.4rem">
+        <div class="fields">
+          <label for="hTotal">Files already in the location<input id="hTotal" type="number" min="0" value="50000"></label>
+          <label for="hNew">New files per micro-batch<input id="hNew" type="number" min="1" value="500"></label>
+          <label for="hLat">Time to open one S3 file (ms)<input id="hLat" type="number" min="1" value="40"></label>
+          <label for="hCores">Executor cores<input id="hCores" type="number" min="1" value="64"></label>
+        </div>
+        <div class="tbl" style="margin-bottom:0"><table>
+          <thead><tr><th>Approach</th><th class="num">Extra file opens per batch</th><th>Where</th><th class="num">Extra time per batch</th></tr></thead>
+          <tbody id="hRows"></tbody></table></div>
+        <p class="small muted" style="margin-bottom:0">Illustrative estimate, not a benchmark. Assumes the original lookup re-read every file's header each batch; if yours cached headers, its cost tracks new files instead, but stays serial on the driver.</p>
+      </div>
+
+      <h3>Fix 1 (best): use the header row Spark already reads</h3>
+      <p>Read with <code>header=false</code> so the header line arrives as a normal row, recognise it by its content, take its last field, and join it back to the same file's rows. <b>Auto Loader never splits one file across micro-batches</b>, so a file's header and data rows are always in the same batch, and a per-batch join is safe. No extra I/O, nothing on the driver, nothing that grows.</p>
+<pre><code>from pyspark.sql import functions as F
+
+HEADER_FIRST = "SOURCE_ID"     <span class="muted"># text of the header's first field</span>
+
+def enrich(batch, batch_id):
+    headers = (batch.where(F.col("c0") == HEADER_FIRST)
+                    .select("file_path",
+                            F.to_timestamp("c_last", "yyyyMMddHHmmss").alias("file_generated_ts")))
+    rows = batch.where(F.col("c0") != HEADER_FIRST)
+    (rows.join(F.broadcast(headers), "file_path", "left")     <span class="muted"># one tiny row per file</span>
+         .drop("c_last")
+         .write.mode("append").saveAsTable("bronze.orders"))
+
+(spark.readStream.format("cloudFiles")
+     .option("cloudFiles.format", "csv")
+     .option("header", "false")               <span class="muted"># keep the header line as a row</span>
+     .schema(raw_schema)                      <span class="muted"># all strings; trailing c_last holds the header's extra field</span>
+     .load(src_path)
+     .withColumn("file_path", F.col("_metadata.file_path"))
+     .writeStream.foreachBatch(enrich)
+     .option("checkpointLocation", checkpoint)
+     .start())</code></pre>
+      <ul>
+        <li>Identify the header by known header text, not by row order. Cast data columns to real types after the join.</li>
+        <li><code>foreachBatch</code> can replay a batch after a failure: make the write idempotent (Delta <code>txnAppId</code>/<code>txnVersion</code> options, or a MERGE).</li>
+        <li><b>In a Lakeflow Declarative Pipeline:</b> land raw lines (header included, with <code>file_path</code>) in one streaming table, then join header rows to data rows on <code>file_path</code> in a downstream streaming table, with a watermark on an ingestion timestamp to bound the join state.</li>
+      </ul>
+
+      <h3>Fix 2: header lookup on executors, for new files only (mapInPandas)</h3>
+      <p>If the files must be read with <code>header=true</code>, move the lookup off the driver and limit it to each batch's <b>new</b> files. <code>mapInPandas</code> runs the reads in parallel on executors; each reads only the first line.</p>
+<pre><code>def first_lines(batches):                         <span class="muted"># runs on executors, in parallel</span>
+    import fsspec
+    for pdf in batches:
+        def ts(path):
+            with fsspec.open(path, "rb") as f:    <span class="muted"># reads only the first block</span>
+                return f.readline().decode().strip().split(",")[-1]
+        pdf["file_ts_raw"] = pdf["file_path"].map(ts)
+        yield pdf
+
+def enrich(batch, batch_id):
+    files = batch.select("file_path").distinct()               <span class="muted"># this batch's files only</span>
+    hdr = files.mapInPandas(first_lines, "file_path string, file_ts_raw string")
+    (batch.join(F.broadcast(hdr), "file_path")
+          .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
+          .write.mode("append").saveAsTable("bronze.orders"))</code></pre>
+      <div class="callout trap"><div class="lbl">Does a pandas UDF fix this on its own?</div>Only partly. pandas UDFs speed up <b>CPU work per row</b> by vectorising it over Arrow batches (<a href="../data-abstractions/deep-dive.html#vectorised">Module 2 deep dive</a>). This problem is <b>I/O</b>: one S3 request per file. The gain here comes from running those requests in parallel on executors and only for new files, not from vectorisation, and every file is still read twice. Fix 1 avoids the second read entirely.</div>
+
+      <h3>Also</h3>
+      <ul>
+        <li><b>Auto Loader discovery:</b> for large, growing locations use <b>file notification mode</b> (or managed file events on newer Databricks runtimes) instead of directory listing.</li>
+        <li><b>Upstream:</b> ask the source to put the timestamp in the file name or as a column on every row, matching your other sources.</li>
+      </ul>
+
+      <h3>Prevent</h3>
+      <ul><li>Review any framework step that loops over files or calls cloud storage from the driver. Per-file metadata should come from the data Spark already reads (<code>_metadata</code> columns, header rows) or be computed on executors.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview (STAR)</div>"One source put its file timestamp in the CSV header instead of the file name. The first design read every file's header on the driver, built a map and broadcast it, so runtime grew with the bucket's total file count. I changed it to read the header line as a normal row, extract the timestamp per file and join it within the micro-batch, which works because Auto Loader never splits a file across batches. That removed the second read and the driver bottleneck entirely, and I switched Auto Loader to file notifications so discovery stopped scaling with the bucket too."</div>
+    </div>
+  </section>
+
   <section id="interview">
     <h2>Common interview questions</h2>
     <div class="qa">
@@ -191,4 +288,19 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
     <a href="../../spark-optimizer.html"><span>Next · Module 4</span><b>Catalyst, joins &amp; AQE</b></a>
   </nav>
 </div></main>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const fmt=ms=>ms<1000?Math.round(ms)+" ms":ms<60000?(ms/1000).toFixed(1)+" s":(ms/60000).toFixed(1)+" min";
+  function calc(){
+    const T=Math.max(0,+$("hTotal").value||0), N=Math.max(1,+$("hNew").value||1), L=Math.max(1,+$("hLat").value||1), C=Math.max(1,+$("hCores").value||1);
+    const rows=[
+      ["Original: driver reads every file's header",(T+N).toLocaleString(),"Driver, one at a time",fmt((T+N)*L)],
+      ["Fix 2: mapInPandas on new files",N.toLocaleString(),"Executors, in parallel",fmt(Math.ceil(N/C)*L)],
+      ["Fix 1: use the header row already read","0","Nothing extra","0 ms"]];
+    $("hRows").innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="num">${r[1]}</td><td>${r[2]}</td><td class="num">${r[3]}</td></tr>`).join("");
+  }
+  ["hTotal","hNew","hLat","hCores"].forEach(id=>$(id).addEventListener("input",calc)); calc();
+})();
+</script>
 </body></html>

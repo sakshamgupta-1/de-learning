@@ -117,6 +117,7 @@ Attempting non-optimization as
       <ul>
         <li>Rewrite with built-in functions where possible: the biggest win.</li>
         <li>Otherwise use a <b>pandas UDF</b>: Arrow batches and vectorised pandas or NumPy code (<a href="deep-dive.html#boundary">why it's faster</a>).</li>
+        <li>If the slow part is <b>I/O per item</b> (opening files, calling APIs) rather than CPU, vectorising won't help much; parallelise it on executors and avoid repeat reads. Real example: <a href="../execution/production.html#file-header-case">reading per-file header values</a>.</li>
         <li>On Spark 3.5+, an <b>Arrow-optimised Python UDF</b> (<code>@udf(useArrow=True)</code>) keeps row-wise code but speeds up data transfer.</li>
         <li>Apply UDFs after filtering, so fewer rows reach Python.</li>
       </ul>
