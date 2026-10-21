@@ -116,7 +116,7 @@ The hub's progress is stored in each reader's browser under the localStorage key
 
 - **Only append** new topics to the end of a group. Inserting or reordering shifts ids and silently corrupts everyone's saved progress.
 - To retire a topic, rename it in place rather than deleting it.
-- Each topic entry is `[title, link, moduleKey, isOriginal]`. `link` is a path from the repo root, such as `spark/architecture/index.html#memory`; use `0` when no page exists yet.
+- Each topic entry is `[title, link, moduleKey]`. `link` is a path from the repo root, such as `spark/architecture/index.html#memory`; use `0` when no page exists yet.
 - When a module page adds a `#mine` checklist, its indices must match the hub's `GROUPS` entries.
 - If you ever must change the scheme, bump the key to `-v2` and note it in the PR.
 

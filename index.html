@@ -14,7 +14,7 @@
     <a href="spark/architecture/index.html">1 · Architecture</a>
     <a href="spark/data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
     <a href="spark/execution/index.html">3 · Execution</a>
-    <a href="spark-optimizer.html">4 · Optimizer &amp; AQE</a>
+    <a href="spark/optimizer/index.html">4 · Optimizer &amp; AQE</a>
     <a href="spark-tuning.html">5 · Tuning &amp; debug</a>
   </nav>
 </div></header>
@@ -23,7 +23,7 @@
   <div class="wide">
     <p class="eyebrow">Interview prep library</p>
     <h1>Data engineering topics, one place</h1>
-    <p class="lede">Your original 12 questions merged with the extended list into 79 topics across seven areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
+    <p class="lede">79 data engineering interview topics across seven areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
 
     <div class="summary">
       <div><div class="big" id="pct">0<small>/79</small></div><div class="muted small">topics done</div></div>
@@ -55,7 +55,7 @@
           <p>spark-submit to completion, plan building, narrow vs wide, jobs → stages → tasks.</p>
           <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
-        <a class="mod" href="spark-optimizer.html" data-mod="opt">
+        <a class="mod" href="spark/optimizer/index.html" data-mod="opt">
           <span class="n">Module 4</span><b>Catalyst, joins &amp; AQE</b>
           <p>Optimizer phases, pushdown and pruning, reading explain(), join strategies, AQE, UDF cost.</p>
           <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
@@ -77,9 +77,7 @@
           <button role="tab" aria-selected="true" data-f="all">All</button>
           <button role="tab" aria-selected="false" data-f="todo">To do</button>
           <button role="tab" aria-selected="false" data-f="done">Done</button>
-          <button role="tab" aria-selected="false" data-f="core">Original 12</button>
         </div>
-        <span class="small muted"><span class="star">Original</span> marks a question from your first list.</span>
       </div>
       <div id="groups"></div>
     </section>
@@ -87,7 +85,7 @@
 </main>
 
 <script>
-const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark-optimizer.html",T="spark-tuning.html";
+const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark-tuning.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
@@ -99,29 +97,29 @@ const GROUPS=[
   ["How jobs, stages and tasks are created",E+"#jobs","exec"],
   ["reduceByKey vs groupByKey",X+"#rbk","exec"],
   ["Catalyst optimizer and Tungsten",O+"#catalyst","opt"],
-  ["Predicate pushdown in Spark SQL",O+"#pushdown","opt",1],
+  ["Predicate pushdown in Spark SQL",O+"#pushdown","opt"],
   ["Partition pruning vs dynamic partition pruning",O+"#pushdown","opt"],
   ["Broadcast join vs sort-merge join vs shuffle hash join",O+"#joins","opt"],
   ["Adaptive Query Execution (AQE) and what it optimizes",O+"#aqe","opt"],
   ["Python UDF vs pandas UDF vs built-in functions",O+"#udf","opt"],
   ["Reading the Spark UI to debug a slow job",T+"#debug","tune"],
-  ["Reduce shuffle operations",T+"#shuffle","tune",1],
-  ["Data skew and how it affects a Spark job",T+"#s-skew","tune",1],
+  ["Reduce shuffle operations",T+"#shuffle","tune"],
+  ["Data skew and how it affects a Spark job",T+"#s-skew","tune"],
   ["Salting technique for skewed joins",T+"#s-skew","tune"],
-  ["OOM errors: how to analyse and resolve",T+"#s-oom","tune",1],
-  ["Disk spill and how to manage it",T+"#s-spill","tune",1],
+  ["OOM errors: how to analyse and resolve",T+"#s-oom","tune"],
+  ["Disk spill and how to manage it",T+"#s-spill","tune"],
   ["Small-file problem and how to fix it",T+"#s-small","tune"],
-  ["Repartition vs coalesce",T+"#repartition","tune",1],
-  ["Spark executor selection and optimization",T+"#executors","tune",1],
+  ["Repartition vs coalesce",T+"#repartition","tune"],
+  ["Spark executor selection and optimization",T+"#executors","tune"],
   ["Cache vs persist and storage levels",T+"#cache","tune"],
   ["Hadoop & MapReduce basics, and what Spark improved",M+"#spark","mr"],
   ["RDD vs DataFrame vs Dataset vs pandas DataFrame",R+"#compare","abs"],
   ["toPandas, Arrow and the pandas API on Spark",P+"#topandas","abs"],
   ["Apache Arrow and vectorised execution (pandas UDFs)",V+"#arrow","abs"]]},
  {id:"stream",name:"Structured Streaming",items:[
-  ["Different output modes in Structured Streaming",0,0,1],
-  ["How to handle late data in Structured Streaming",0,0,1],
-  ["Common performance bottlenecks in Structured Streaming",0,0,1],
+  ["Different output modes in Structured Streaming"],
+  ["How to handle late data in Structured Streaming"],
+  ["Common performance bottlenecks in Structured Streaming"],
   ["Trigger types (processingTime, availableNow, continuous)"],
   ["Checkpointing and exactly-once guarantees"],
   ["foreachBatch and MERGE for streaming upserts"],
@@ -130,8 +128,8 @@ const GROUPS=[
   ["Auto Loader: directory listing vs file notification"],
   ["Kafka offsets, consumer groups and delivery semantics"]]},
  {id:"delta",name:"Delta Lake & Databricks",items:[
-  ["OPTIMIZE vs ZORDER",0,0,1],
-  ["How to handle deletes in Lakeflow",0,0,1],
+  ["OPTIMIZE vs ZORDER"],
+  ["How to handle deletes in Lakeflow"],
   ["Delta transaction log and optimistic concurrency"],
   ["OPTIMIZE vs VACUUM"],
   ["Liquid clustering vs partitioning + ZORDER"],
@@ -192,13 +190,13 @@ function render(){
     wrap.innerHTML=`<h3>${g.name}<span>${cnt}/${g.items.length}</span></h3>`;
     let shown=0;
     g.items.forEach((it,i)=>{
-      n++;const id=g.id+i,isDone=!!done[id],core=!!it[3];
-      if(filter==="todo"&&isDone)return; if(filter==="done"&&!isDone)return; if(filter==="core"&&!core)return;
+      n++;const id=g.id+i,isDone=!!done[id];
+      if(filter==="todo"&&isDone)return; if(filter==="done"&&!isDone)return;
       shown++;
       const row=document.createElement("div");row.className="topic"+(isDone?" done":"");
       row.innerHTML=`<input type="checkbox" id="t-${id}" ${isDone?"checked":""} aria-label="Mark done">
         <span class="num">${String(n).padStart(2,"0")}</span>
-        <label class="ttl" for="t-${id}">${it[0]}${core?'<span class="star">Original</span>':""}</label>
+        <label class="ttl" for="t-${id}">${it[0]}</label>
         ${it[1]?`<a class="go" href="${it[1]}">Study →</a>`:'<span class="soon">page to come</span>'}`;
       row.querySelector("input").addEventListener("change",e=>{done[id]=e.target.checked;if(!e.target.checked)delete done[id];save();render()});
       wrap.appendChild(row);

@@ -236,7 +236,6 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var
 .topic.done .ttl{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}
 .topic .go{font-size:.8rem;white-space:nowrap}
 .topic .soon{font:.72rem var(--mono);color:var(--muted)}
-.star{font:600 .66rem var(--mono);color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:.12rem .35rem;margin-left:.4rem;vertical-align:.1em;white-space:nowrap}
 @media (max-width:520px){.topic{grid-template-columns:auto 1.8rem minmax(0,1fr)}.topic .go,.topic .soon{grid-column:3}}
 
 /* module navigation: breadcrumb + module tabs (overview-first structure) */
@@ -265,3 +264,14 @@ svg .dotA{fill:var(--accent)}
 .out.lanes{grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr))}
 .out .lane-a b{color:var(--accent)}
 .out .lane-b b{color:var(--ok)}
+
+/* pushdown and pruning simulator (optimizer deep dive) */
+.pd-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.8rem;margin:.6rem 0}
+.pd-folder{border:1px solid var(--line);border-radius:10px;padding:.6rem;background:var(--surface);display:grid;gap:.4rem;transition:opacity .2s}
+.pd-folder.pruned{opacity:.45;border-style:dashed}
+.pd-head{font:600 .78rem var(--mono);color:var(--fg)}
+.pd-rg{display:flex;justify-content:space-between;gap:.5rem;font-size:.78rem;padding:.35rem .5rem;border-radius:6px;border:1px solid transparent}
+.pd-rg b{font-family:var(--mono);font-weight:600}
+.pd-rg.read{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.pd-rg.skip{background:var(--sunk);color:var(--muted);text-decoration:line-through}
+@media (prefers-reduced-motion:reduce){.pd-folder{transition:none}}

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Catalyst, Joins and AQE</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="index.html" aria-current="page">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">Catalyst, joins &amp; AQE</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 4 of 5 · Overview</p>
+  <h1>How Spark decides how to run your query</h1>
+  <p class="lede">Catalyst rewrites your plan before it runs; AQE rewrites it again while it runs. Knowing both lets you predict what Spark will do and read <code>explain()</code> with confidence. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#catalyst">Catalyst</a><a href="#pushdown">Reading less data</a><a href="#joins">Join strategies</a><a href="#aqe">AQE</a><a href="#udf">UDF cost</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="catalyst">
+    <h2>Catalyst: four phases</h2>
+    <p>SQL and the DataFrame API compile to the same plan, which is why they perform the same. <b>Catalyst</b>, Spark's query optimiser, turns that plan into running code in four phases.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 1000 200" role="img" aria-labelledby="catT">
+  <title id="catT">Catalyst pipeline from query to generated code</title>
+  <defs><marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect class="bx2" x="10" y="40" width="140" height="72" rx="8"/><text class="tb" x="80" y="72" text-anchor="middle">SQL / DataFrame</text><text class="ts" x="80" y="92" text-anchor="middle">your query</text>
+  <rect class="bx" x="176" y="40" width="140" height="72" rx="8"/><text class="tb" x="246" y="72" text-anchor="middle">Unresolved</text><text class="ts" x="246" y="92" text-anchor="middle">logical plan</text>
+  <rect class="bx" x="342" y="40" width="140" height="72" rx="8"/><text class="tb" x="412" y="72" text-anchor="middle">Analyzed</text><text class="ts" x="412" y="92" text-anchor="middle">logical plan</text>
+  <rect class="bxb" x="508" y="40" width="140" height="72" rx="8"/><text class="tb" x="578" y="72" text-anchor="middle">Optimized</text><text class="ts" x="578" y="92" text-anchor="middle">logical plan</text>
+  <rect class="bxa" x="674" y="40" width="140" height="72" rx="8"/><text class="tb" x="744" y="72" text-anchor="middle">Physical plan</text><text class="ts" x="744" y="92" text-anchor="middle">selected by cost</text>
+  <rect class="bxo" x="840" y="40" width="150" height="72" rx="8"/><text class="tb" x="915" y="72" text-anchor="middle">Generated code</text><text class="ts" x="915" y="92" text-anchor="middle">runs as RDD tasks</text>
+  <line class="ln" x1="150" y1="76" x2="172" y2="76" marker-end="url(#d1)"/>
+  <line class="ln" x1="316" y1="76" x2="338" y2="76" marker-end="url(#d1)"/>
+  <line class="ln" x1="482" y1="76" x2="504" y2="76" marker-end="url(#d1)"/>
+  <line class="ln" x1="648" y1="76" x2="670" y2="76" marker-end="url(#d1)"/>
+  <line class="ln" x1="814" y1="76" x2="836" y2="76" marker-end="url(#d1)"/>
+  <text class="tm" x="163" y="140" text-anchor="middle">parse</text>
+  <text class="tm" x="329" y="140" text-anchor="middle">1 · analysis</text><text class="ts" x="329" y="158" text-anchor="middle">resolve names</text><text class="ts" x="329" y="174" text-anchor="middle">via catalog</text>
+  <text class="tm" x="495" y="140" text-anchor="middle">2 · logical opt.</text><text class="ts" x="495" y="158" text-anchor="middle">rule-based</text><text class="ts" x="495" y="174" text-anchor="middle">rewrites</text>
+  <text class="tm" x="661" y="140" text-anchor="middle">3 · physical</text><text class="ts" x="661" y="158" text-anchor="middle">pick joins,</text><text class="ts" x="661" y="174" text-anchor="middle">aggregations</text>
+  <text class="tm" x="827" y="140" text-anchor="middle">4 · codegen</text><text class="ts" x="827" y="158" text-anchor="middle">whole-stage</text><text class="ts" x="827" y="174" text-anchor="middle">Java bytecode</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <ol class="rail">
+    <li><div><b>Analysis.</b> Resolves table and column names against the catalog. A misspelt column fails here with <code>AnalysisException</code>.</div></li>
+    <li><div><b>Logical optimisation.</b> Rule-based rewrites: push filters down, prune columns, fold constants, combine filters.</div></li>
+    <li><div><b>Physical planning.</b> Picks concrete operators, for example a broadcast or sort-merge join, using sizes and thresholds.</div></li>
+    <li><div><b>Code generation.</b> <b>Tungsten</b> fuses each stage's operators into one compiled function working on compact binary rows. On Databricks, <b>Photon</b> replaces much of this with a vectorised C++ engine.</div></li>
+  </ol>
+  <p class="small muted">Step through each phase with a real plan: <a href="deep-dive.html#catalyst-steps">Catalyst stepper →</a></p>
+
+  <section id="pushdown">
+    <h2>Reading less data</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Technique</th><th>What gets skipped</th><th>In <code>explain()</code></th></tr></thead>
+      <tbody>
+        <tr><td><b>Predicate pushdown</b></td><td>Row groups inside files, using min/max statistics</td><td><code>PushedFilters: […]</code></td></tr>
+        <tr><td><b>Column pruning</b></td><td>Columns the query doesn't use</td><td><code>ReadSchema: struct&lt;…&gt;</code></td></tr>
+        <tr><td><b>Partition pruning</b></td><td>Whole partition folders (<code>dt=…</code>)</td><td><code>PartitionFilters: […]</code></td></tr>
+        <tr><td><b>Dynamic partition pruning</b></td><td>Fact partitions, using keys from a filtered dimension at runtime</td><td><code>dynamicpruningexpression(…)</code></td></tr>
+      </tbody></table></div>
+    <p><b>What breaks it:</b> wrapping the column in a function or cast (<code>to_date(ts) = …</code>, <code>upper(country) = …</code>), filtering on a Python UDF's output, formats without statistics (CSV, JSON), and data so mixed that min/max statistics can't rule anything out. <a href="deep-dive.html#pushdown">Try it interactively →</a></p>
+  </section>
+
+  <section id="joins">
+    <h2>Join strategies</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Strategy</th><th>How it works</th><th>Use when</th><th>Watch out</th></tr></thead>
+      <tbody>
+        <tr><td><b>Broadcast hash join</b></td><td>Small side sent to every executor; big side joined in place</td><td>One side under <code>autoBroadcastJoinThreshold</code> (10 MB default)</td><td>Too-large broadcasts cause OOM; can't broadcast the preserved side of an outer join</td></tr>
+        <tr><td><b>Sort-merge join</b></td><td>Shuffle both sides by key, sort, merge</td><td>Two large tables; the default</td><td>Two shuffles and sorts; sensitive to skew</td></tr>
+        <tr><td><b>Shuffle hash join</b></td><td>Shuffle both sides, hash the smaller per partition</td><td>One side medium-sized</td><td>OOM if a partition's hash table doesn't fit</td></tr>
+        <tr><td><b>Nested loop / cartesian</b></td><td>Compare every pair</td><td>Non-equi joins only</td><td>Quadratic cost</td></tr>
+      </tbody></table></div>
+    <p class="small muted">See which one Spark would pick for your sizes and join type: <a href="examples.html#picker">Join strategy picker →</a></p>
+  </section>
+
+  <section id="aqe">
+    <h2>Adaptive Query Execution (AQE)</h2>
+    <p>Catalyst plans with <b>estimates</b>. AQE, on by default since Spark 3.2, re-plans <b>between stages</b> using the <b>real sizes</b> measured at each shuffle. It does three things:</p>
+    <ul>
+      <li><b>Coalesces</b> many small post-shuffle partitions into fewer, right-sized ones.</li>
+      <li><b>Switches join strategy</b>, for example sort-merge to broadcast, when a side turns out small.</li>
+      <li><b>Splits skewed partitions</b> in sort-merge joins so one hot key doesn't stall the stage.</li>
+    </ul>
+    <p>It can't fix skew in aggregations or windows, a bad file layout, or slow UDFs. <a href="deep-dive.html#aqe">See each rewrite before and after →</a></p>
+  </section>
+
+  <section id="udf">
+    <h2>UDF cost in one line</h2>
+    <p><b>Built-in functions</b> (fastest, fully optimised) → <b>pandas UDFs</b> (Arrow batches, vectorised) → <b>plain Python UDFs</b> (row by row, slowest). Catalyst can't look inside any UDF, so it can't push filters through them. The full story is in <a href="../data-abstractions/deep-dive.html#boundary">Module 2's Arrow deep dive</a>.</p>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Setting or fact</th><th class="num">Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>spark.sql.autoBroadcastJoinThreshold</code></td><td class="num">10 MB</td></tr>
+        <tr><td>Hard limit on a broadcast table</td><td class="num">8 GB</td></tr>
+        <tr><td><code>spark.sql.broadcastTimeout</code></td><td class="num">300 s</td></tr>
+        <tr><td><code>spark.sql.join.preferSortMergeJoin</code></td><td class="num">true</td></tr>
+        <tr><td><code>spark.sql.adaptive.enabled</code> (since Spark 3.2)</td><td class="num">true</td></tr>
+        <tr><td><code>spark.sql.adaptive.advisoryPartitionSizeInBytes</code></td><td class="num">64 MB</td></tr>
+        <tr><td>Skewed partition (AQE): over 5 × median <b>and</b> over</td><td class="num">256 MB</td></tr>
+        <tr><td><code>spark.sql.optimizer.dynamicPartitionPruning.enabled</code></td><td class="num">true</td></tr>
+        <tr><td><code>spark.sql.cbo.enabled</code> (cost-based optimiser)</td><td class="num">false</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Catalyst</div>"Catalyst analyses the plan against the catalog, applies rule-based rewrites like predicate pushdown and column pruning, chooses physical operators such as the join strategy, and Tungsten generates compiled code for each stage. SQL and DataFrames go through the same pipeline, so they perform the same."</div>
+    <div class="callout say"><div class="lbl">Join strategies</div>"If one side is under the broadcast threshold Spark broadcasts it and joins the big side in place, with no shuffle. Otherwise it defaults to sort-merge join, which shuffles and sorts both sides. Shuffle hash join suits a medium build side, and nested-loop joins are only for non-equi conditions."</div>
+    <div class="callout say"><div class="lbl">AQE</div>"AQE re-optimises at each shuffle using real sizes: it coalesces small partitions, switches sort-merge to broadcast when a side turns out small, and splits skewed join partitions. It doesn't fix skewed aggregations or slow UDFs."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Your filter is <code>date(event_ts) = '2026-10-01'</code> and the table is partitioned by <code>event_date</code>. Why is it slow?</summary><div>It filters on a function of a non-partition column, so there's no partition pruning and weaker pushdown. Filter on <code>event_date</code>, or on an <code>event_ts</code> range.</div></details>
+      <details><summary>A 30 MB dimension is joined with a sort-merge join. Two fixes?</summary><div>Raise <code>autoBroadcastJoinThreshold</code> above 30 MB, or add a <code>broadcast()</code> hint. With AQE on, Spark may switch at runtime once it measures the filtered side.</div></details>
+      <details><summary><code>explain()</code> shows SortMergeJoin but the job ran a broadcast join. How?</summary><div>AQE changed the plan at runtime. <code>explain()</code> shows the initial plan (<code>isFinalPlan=false</code>); the SQL tab in the Spark UI shows the final one.</div></details>
+      <details><summary>Predicate pushdown vs partition pruning?</summary><div>Partition pruning skips whole folders using partition-column filters. Pushdown sends filters into the file reader to skip row groups inside files that are still read.</div></details>
+      <details><summary>Can AQE fix a skewed <code>groupBy</code>?</summary><div>No. AQE's skew handling covers sort-merge joins. Skewed aggregations need salting or a two-step aggregation.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html">
+        <span class="n">Deep dive</span><b>Inside Catalyst and AQE</b>
+        <p>Step through a query's plan phase by phase, optimiser rules before and after, statistics and the cost-based optimiser, an interactive pushdown and pruning simulator, and AQE's three rewrites.</p>
+      </a>
+      <a class="mod" href="examples.html">
+        <span class="n">Examples</span><b>Read plans, pick joins</b>
+        <p>An annotated <code>explain()</code> output, an interactive join strategy picker, and join hints in Python and SQL.</p>
+      </a>
+      <a class="mod" href="production.html">
+        <span class="n">Production issues</span><b>When the optimiser gets it wrong</b>
+        <p>Filters not pushed down, wrong join choice from bad statistics, accidental cartesian joins, AQE not kicking in, broadcast timeouts and plan regressions.</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../execution/index.html"><span>Previous · Module 3</span><b>Execution flow &amp; lazy evaluation</b></a>
+    <a href="../../spark-tuning.html"><span>Next · Module 5</span><b>Performance tuning &amp; debugging</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const KEY="de-learning-done-v1",items=[[8,"Catalyst optimizer and Tungsten"],[9,"Predicate pushdown in Spark SQL"],[10,"Partition pruning vs dynamic partition pruning"],[11,"Broadcast join vs sort-merge join vs shuffle hash join"],[12,"Adaptive Query Execution (AQE)"],[13,"Python UDF vs pandas UDF vs built-in functions"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

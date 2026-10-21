@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Catalyst and Join Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="index.html" aria-current="page">4 · Optimizer &amp; AQE</a>
+    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Catalyst, joins &amp; AQE</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 4 · Examples</p>
+  <h1>Read plans, pick joins</h1>
+  <p class="lede">An annotated physical plan to practise reading, an interactive picker that shows which join strategy Spark would choose and why, and the hints to override it.</p>
+  <div class="toc"><a href="#explain">Reading explain()</a><a href="#picker">Join strategy picker</a><a href="#hints">Join hints</a><a href="#check">Check yourself</a></div>
+
+  <section id="explain">
+    <h2>Reading a physical plan</h2>
+    <p>Run <code>df.explain("formatted")</code> (or <code>EXPLAIN FORMATTED</code> in SQL). Read it <b>bottom up</b>: scans at the bottom, the result at the top. This is the orders/customers query from the deep dive.</p>
+<pre><code>AdaptiveSparkPlan isFinalPlan=false
++- HashAggregate(keys=[segment], functions=[<span class="hl">sum(amount)</span>])
+   +- <span class="k">Exchange hashpartitioning(segment, 200)</span>
+      +- HashAggregate(keys=[segment], functions=[<span class="hl">partial_sum(amount)</span>])
+         +- Project [amount, segment]
+            +- <span class="k">BroadcastHashJoin</span> [cust_id], [cust_id], Inner, BuildRight
+               :- Filter (isnotnull(country) AND (country = AE))
+               :  +- FileScan parquet [cust_id,amount,country]
+               :       <span class="hl">PushedFilters: [IsNotNull(country), EqualTo(country,AE)]</span>
+               :       <span class="hl">ReadSchema: struct&lt;cust_id:bigint,amount:double,country:string&gt;</span>
+               +- <span class="k">BroadcastExchange</span> HashedRelationBroadcastMode(...)
+                  +- FileScan parquet [cust_id,segment]</code></pre>
+    <div class="tbl"><table>
+      <thead><tr><th>Look for</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>Exchange</code></td><td>A shuffle, and a stage boundary. Count them; each one costs network and disk.</td></tr>
+        <tr><td><code>BroadcastHashJoin</code> / <code>SortMergeJoin</code></td><td>The join strategy chosen. A sort-merge join on a small table is a tuning opportunity.</td></tr>
+        <tr><td><code>BuildRight</code> / <code>BuildLeft</code></td><td>Which side is hashed (or broadcast)</td></tr>
+        <tr><td><code>partial_sum</code> → <code>sum</code></td><td>Map-side pre-aggregation before the shuffle</td></tr>
+        <tr><td><code>PushedFilters</code>, <code>PartitionFilters</code></td><td>Whether your filters reached the source. Empty lists mean full scans.</td></tr>
+        <tr><td><code>AdaptiveSparkPlan isFinalPlan=false</code></td><td>AQE is on; the plan may change at runtime. Check the SQL tab of the Spark UI for the final plan.</td></tr>
+        <tr><td><code>*(2)</code> prefixes</td><td>Operators fused into whole-stage codegen block 2 (plain <code>explain()</code> output)</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="picker">
+    <h2>Join strategy picker</h2>
+    <p>Set the join and the sizes; see what Spark plans before running, and what AQE would switch to once real sizes are known. It follows Spark's main selection rules, simplified.</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="jt">Join type<select id="jt">
+          <option value="inner" selected>INNER</option><option value="left">LEFT OUTER</option><option value="right">RIGHT OUTER</option>
+          <option value="full">FULL OUTER</option><option value="semi">LEFT SEMI / ANTI</option></select></label>
+        <label for="cond">Join condition<select id="cond"><option value="eq" selected>Equality (a.id = b.id)</option><option value="neq">Non-equi (BETWEEN, &lt;)</option></select></label>
+        <label for="hint">Hint<select id="hint"><option value="" selected>None</option><option value="bR">BROADCAST(right)</option><option value="bL">BROADCAST(left)</option><option value="merge">MERGE</option><option value="sh">SHUFFLE_HASH</option></select></label>
+        <label for="L">Left side size (MB)<input id="L" type="number" min="1" value="50000"></label>
+        <label for="Re">Right side, estimated at planning (MB)<input id="Re" type="number" min="1" value="400"></label>
+        <label for="Ra">Right side, real size at runtime (MB)<input id="Ra" type="number" min="1" value="6"></label>
+        <label for="thr">Broadcast threshold (MB)<input id="thr" type="number" min="-1" value="10"></label>
+        <label for="aqe" style="flex-direction:row;align-items:center;gap:.5rem;margin-top:1.4rem"><input id="aqe" type="checkbox" checked style="width:auto"> AQE enabled</label>
+      </div>
+      <div class="out" id="jOut"></div>
+      <ul id="jWhy" class="small" style="margin-bottom:0"></ul>
+    </div>
+    <p class="small muted">Try: set the runtime size above the threshold, switch to FULL OUTER, or add <code>BROADCAST(left)</code> to a LEFT OUTER join. A threshold of <code>-1</code> disables automatic broadcasting.</p>
+  </section>
+
+  <section id="hints">
+    <h2>Join hints</h2>
+<pre><code>from pyspark.sql.functions import broadcast
+
+orders.join(broadcast(customers), "cust_id")                 <span class="muted"># force broadcast of customers</span>
+orders.hint("merge").join(customers, "cust_id")              <span class="muted"># ask for sort-merge</span>
+orders.join(customers.hint("shuffle_hash"), "cust_id")       <span class="muted"># ask for shuffle hash</span>
+
+spark.sql("""
+  SELECT /*+ BROADCAST(c) */ o.*, c.segment
+  FROM orders o JOIN customers c USING (cust_id)
+""")
+<span class="muted"># SQL hints: BROADCAST (also BROADCASTJOIN, MAPJOIN), MERGE, SHUFFLE_HASH, SHUFFLE_REPLICATE_NL</span></code></pre>
+    <div class="callout trap"><div class="lbl">Hints are commands, not suggestions</div>A <code>BROADCAST</code> hint broadcasts the table <b>even if it's far over the threshold</b>, which is how many driver OOMs start. Use hints for stable, known-small tables, and prefer fixing statistics or thresholds so Spark chooses correctly on its own.</div>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>Why can't Spark broadcast the left side of a LEFT OUTER join?</summary><div>Every left row must appear in the output, matched or not. If the left side were broadcast, each executor would see all left rows but only part of the right side, and couldn't tell whether a left row matched somewhere else. So only the right side (the non-preserved side) can be the build side.</div></details>
+      <details><summary>Which strategies can handle a FULL OUTER equi-join?</summary><div>Sort-merge join (the default), and shuffle hash join since Spark 3.1. Broadcast hash join can't, because both sides are preserved.</div></details>
+      <details><summary>The plan says SortMergeJoin, the job ran a BroadcastHashJoin. Which setting made that possible?</summary><div><code>spark.sql.adaptive.enabled</code>: AQE measured the real size of one side after its stage ran, found it under the (adaptive) broadcast threshold, and switched strategy.</div></details>
+      <details><summary>What does <code>spark.sql.autoBroadcastJoinThreshold = -1</code> do?</summary><div>Disables automatic broadcast joins. Explicit <code>BROADCAST</code> hints still work.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const NAME={BHJ:"BroadcastHashJoin",SMJ:"SortMergeJoin",SHJ:"ShuffledHashJoin",BNLJ:"BroadcastNestedLoopJoin",CART:"CartesianProduct"};
+  const SHUF={BHJ:"0 (big side stays put)",SMJ:"2 + sort both sides",SHJ:"2",BNLJ:"0 (but every pair compared)",CART:"0 (but every pair compared)"};
+  function decide(){
+    const jt=$("jt").value, eq=$("cond").value==="eq", hint=$("hint").value, aqe=$("aqe").checked;
+    const L=+$("L").value||0, Re=+$("Re").value||0, Ra=+$("Ra").value||0, thr=+$("thr").value;
+    const auto=thr>=0, why=[];
+    const buildable={inner:["L","R"],left:["R"],right:["L"],full:[],semi:["R"]}[jt];
+    const size={L:L,R:Re}, side={L:"left",R:"right"};
+    const jtName={inner:"INNER",left:"LEFT OUTER",right:"RIGHT OUTER",full:"FULL OUTER",semi:"LEFT SEMI/ANTI"}[jt];
+    let plan=null,build=null;
+    if(!eq){
+      const small=buildable.filter(s=>(auto&&size[s]<=thr)||hint==="b"+s);
+      if(small.length){plan="BNLJ";build=small[0];why.push(`Non-equi condition, so no hash or sort-merge join is possible. The ${side[build]} side can be broadcast, so Spark compares each row against it.`);}
+      else if(jt==="inner"){plan="CART";why.push("Non-equi condition and neither side is small enough to broadcast: Spark falls back to a cartesian product, comparing every pair. Very expensive.");}
+      else {plan="BNLJ";build=buildable[0]||"R";why.push(`Non-equi ${jtName} join with no small side: Spark still uses a broadcast nested loop join, broadcasting a large side. Expect memory problems.`);}
+      return out(plan,plan,why,build);
+    }
+    if(hint==="bL"||hint==="bR"){const s=hint==="bL"?"L":"R";
+      if(buildable.includes(s)){plan="BHJ";build=s;why.push(`BROADCAST hint on the ${side[s]} side: Spark broadcasts it regardless of size.`);
+        if(size[s]>thr&&auto)why.push(`Warning: ${size[s].toLocaleString()} MB is over the ${thr} MB threshold. Large broadcasts risk driver OOM and timeouts.`);}
+      else why.push(`BROADCAST hint ignored: the ${side[s]} side is preserved in a ${jtName} join, so it can't be the build side.`);}
+    if(!plan&&hint==="merge"){plan="SMJ";why.push("MERGE hint: sort-merge join requested.");}
+    if(!plan&&hint==="sh"){const b=buildable.length?buildable.reduce((a,c)=>size[c]<size[a]?c:a):null;
+      if(b||jt==="full"){plan="SHJ";build=b||"R";why.push(`SHUFFLE_HASH hint: both sides are shuffled and the ${side[build]} side is hashed per partition${jt==="full"?" (full outer supported since Spark 3.1)":""}.`);}}
+    if(!plan){const cands=buildable.filter(s=>auto&&size[s]<=thr);
+      if(cands.length){build=cands.reduce((a,c)=>size[c]<size[a]?c:a);plan="BHJ";why.push(`The ${side[build]} side (${size[build].toLocaleString()} MB estimated) is under the ${thr} MB threshold, so Spark broadcasts it.`);}
+      else{plan="SMJ";why.push(!auto?"Automatic broadcast is disabled (threshold −1), so Spark uses its default: sort-merge join.":(buildable.length?`No buildable side is under the ${thr} MB threshold at planning time, so Spark uses its default: sort-merge join.`:`In a FULL OUTER join neither side can be broadcast, so Spark uses sort-merge join.`));}}
+    let final=plan;
+    if(plan==="SMJ"&&hint!=="merge"){
+      if(!aqe)why.push("AQE is off, so the plan can't change at runtime.");
+      else if(buildable.includes("R")&&auto&&Ra<=thr){final="BHJ";build="R";why.push(`At runtime AQE measures the right side at ${Ra.toLocaleString()} MB, under the threshold, and switches to a broadcast hash join.`);}
+      else why.push("AQE checks the real sizes at runtime but nothing qualifies for a broadcast, so the sort-merge join stays.");}
+    return out(plan,final,why,build);
+  }
+  function out(p,f,why,build){
+    $("jOut").innerHTML=[[NAME[p],"initial plan (explain)"],[NAME[f],"final plan (what runs)"],[SHUF[f],"shuffles for the join"]].map(([v,l])=>`<div><b style="font-size:1rem">${v}</b><span>${l}</span></div>`).join("");
+    $("jWhy").innerHTML=why.map(w=>`<li>${w}</li>`).join("");
+  }
+  ["jt","cond","hint","L","Re","Ra","thr","aqe"].forEach(id=>$(id).addEventListener("input",decide));
+  ["jt","cond","hint","aqe"].forEach(id=>$(id).addEventListener("change",decide));
+  decide();
+})();
+</script>
+</body></html>
