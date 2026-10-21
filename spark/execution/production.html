@@ -210,6 +210,22 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
         <p class="small muted" style="margin-bottom:0">Illustrative estimate, not a benchmark. Assumes the original lookup re-read every file's header each batch; if yours cached headers, its cost tracks new files instead, but stays serial on the driver.</p>
       </div>
 
+      <h3 id="microbatch">Background: what an Auto Loader micro-batch is</h3>
+      <p>Auto Loader is a Structured Streaming source, so it runs as a loop of <b>micro-batches</b>. Each one is an ordinary Spark batch query over a slice of new files:</p>
+<pre class="tree"><code>Streaming query     runs until stopped (or until the backlog is done with availableNow)
+└─ Micro-batch      batch_id 0, 1, 2 … = a set of NEW files, up to maxFilesPerTrigger (1,000)
+   └─ Job(s)        one per action on that batch; each write inside foreachBatch is 1+ jobs
+      └─ Stage      split at every shuffle
+         └─ Task    one per input split: small files packed together, large uncompressed files split</code></pre>
+      <ol>
+        <li><b>Discover</b> new files (directory listing or file notifications).</li>
+        <li><b>Cap</b> them at <code>cloudFiles.maxFilesPerTrigger</code> / <code>maxBytesPerTrigger</code>: 2,500 new files at the default = 3 micro-batches.</li>
+        <li><b>Record</b> the batch's file list in the checkpoint's offset log <i>before</i> processing, so a failed batch is replayed with exactly the same files.</li>
+        <li><b>Run</b> it: <code>foreachBatch</code> receives a static DataFrame of those files; every action inside it creates jobs, stages and tasks as usual.</li>
+        <li><b>Commit</b> to the commit log once the sink succeeds, then start the next batch.</li>
+      </ol>
+      <p>The guarantee this case study relies on is at <b>batch</b> level: Auto Loader never splits one file across micro-batches. It isn't at <b>task</b> level: within a batch, one large file can be read by several tasks.</p>
+
       <h3>Fix 1 (best): use the header row Spark already reads</h3>
       <p>Read with <code>header=false</code> so the header line arrives as a normal row, recognise it by its content, take its last field, and join it back to the same file's rows. <b>Auto Loader never splits one file across micro-batches</b>, so a file's header and data rows are always in the same batch, and a per-batch join is safe. No extra I/O, nothing on the driver, nothing that grows.</p>
 <pre><code>from pyspark.sql import functions as F
@@ -217,13 +233,17 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
 HEADER_FIRST = "SOURCE_ID"     <span class="muted"># text of the header's first field</span>
 
 def enrich(batch, batch_id):
-    headers = (batch.where(F.col("c0") == HEADER_FIRST)
-                    .select("file_path",
-                            F.to_timestamp("c_last", "yyyyMMddHHmmss").alias("file_generated_ts")))
-    rows = batch.where(F.col("c0") != HEADER_FIRST)
-    (rows.join(F.broadcast(headers), "file_path", "left")     <span class="muted"># one tiny row per file</span>
-         .drop("c_last")
-         .write.mode("append").saveAsTable("bronze.orders"))
+    batch.persist()                <span class="muted"># read the batch's files once; both branches below reuse it</span>
+    try:
+        headers = (batch.where(F.col("c0") == HEADER_FIRST)
+                        .select("file_path",
+                                F.to_timestamp("c_last", "yyyyMMddHHmmss").alias("file_generated_ts")))
+        rows = batch.where(F.col("c0") != HEADER_FIRST)
+        (rows.join(F.broadcast(headers), "file_path", "left")     <span class="muted"># one tiny row per file</span>
+             .drop("c_last")
+             .write.mode("append").saveAsTable("bronze.orders"))
+    finally:
+        batch.unpersist()
 
 (spark.readStream.format("cloudFiles")
      .option("cloudFiles.format", "csv")
@@ -235,6 +255,8 @@ def enrich(batch, batch_id):
      .option("checkpointLocation", checkpoint)
      .start())</code></pre>
       <ul>
+        <li><b>Why <code>persist()</code>:</b> <code>headers</code> and <code>rows</code> both come from <code>batch</code>, and Spark doesn't share scans between the two sides of a join. Without it, the batch's files would be read twice. An alternative that needs no cache is a window, <code>max(when(header, c_last)).over(Window.partitionBy("file_path"))</code>: one scan, but every row is shuffled by file.</li>
+        <li><b>Why a batch-wide join, not per-partition logic:</b> a large uncompressed CSV can be split into several tasks within the batch, and only the task reading the file's first block sees the header row. The broadcast join brings each file's timestamp to all its rows, whichever task reads them. (<a href="#microbatch">How a micro-batch maps to jobs and tasks</a>)</li>
         <li>Identify the header by known header text, not by row order. Cast data columns to real types after the join.</li>
         <li><code>foreachBatch</code> can replay a batch after a failure: make the write idempotent (Delta <code>txnAppId</code>/<code>txnVersion</code> options, or a MERGE).</li>
         <li><b>In a Lakeflow Declarative Pipeline:</b> land raw lines (header included, with <code>file_path</code>) in one streaming table, then join header rows to data rows on <code>file_path</code> in a downstream streaming table, with a watermark on an ingestion timestamp to bound the join state.</li>
@@ -252,11 +274,15 @@ def enrich(batch, batch_id):
         yield pdf
 
 def enrich(batch, batch_id):
-    files = batch.select("file_path").distinct()               <span class="muted"># this batch's files only</span>
-    hdr = files.mapInPandas(first_lines, "file_path string, file_ts_raw string")
-    (batch.join(F.broadcast(hdr), "file_path")
-          .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
-          .write.mode("append").saveAsTable("bronze.orders"))</code></pre>
+    batch.persist()                                            <span class="muted"># distinct() and the join both reuse one scan</span>
+    try:
+        files = batch.select("file_path").distinct()           <span class="muted"># this batch's files only</span>
+        hdr = files.mapInPandas(first_lines, "file_path string, file_ts_raw string")
+        (batch.join(F.broadcast(hdr), "file_path")
+              .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
+              .write.mode("append").saveAsTable("bronze.orders"))
+    finally:
+        batch.unpersist()</code></pre>
       <div class="callout trap"><div class="lbl">Does a pandas UDF fix this on its own?</div>Only partly. pandas UDFs speed up <b>CPU work per row</b> by vectorising it over Arrow batches (<a href="../data-abstractions/deep-dive.html#vectorised">Module 2 deep dive</a>). This problem is <b>I/O</b>: one S3 request per file. The gain here comes from running those requests in parallel on executors and only for new files, not from vectorisation, and every file is still read twice. Fix 1 avoids the second read entirely.</div>
 
       <h3>Also</h3>
