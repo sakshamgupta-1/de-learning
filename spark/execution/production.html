@@ -207,7 +207,7 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
         <div class="tbl" style="margin-bottom:0"><table>
           <thead><tr><th>Approach</th><th class="num">Extra file opens per batch</th><th>Where</th><th class="num">Extra time per batch</th></tr></thead>
           <tbody id="hRows"></tbody></table></div>
-        <p class="small muted" style="margin-bottom:0">Illustrative estimate, not a benchmark. Assumes the original lookup re-read every file's header each batch; if yours cached headers, its cost tracks new files instead, but stays serial on the driver.</p>
+        <p class="small muted" style="margin-bottom:0">Illustrative estimate, not a benchmark. Counts only extra S3 file opens. Assumes the original lookup re-read every file's header each batch; if yours cached headers, its cost tracks new files instead, but stays serial on the driver. The fixes have other costs this doesn't show (a shuffle, a second scan); see <a href="#compare-fixes">comparing the fixes</a>.</p>
       </div>
 
       <h3 id="microbatch">Background: what an Auto Loader micro-batch is</h3>
@@ -226,8 +226,8 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
       </ol>
       <p>The guarantee this case study relies on is at <b>batch</b> level: Auto Loader never splits one file across micro-batches. It isn't at <b>task</b> level: within a batch, one large file can be read by several tasks.</p>
 
-      <h3>Fix 1 (best): use the header row Spark already reads</h3>
-      <p>Read with <code>header=false</code> so the header line arrives as a normal row, recognise it by its content, take its last field, and join it back to the same file's rows. <b>Auto Loader never splits one file across micro-batches</b>, so a file's header and data rows are always in the same batch, and a per-batch join is safe. No extra I/O, nothing on the driver, nothing that grows.</p>
+      <h3>Fix 1 (always correct): use the header row Spark already reads</h3>
+      <p>Read with <code>header=false</code> so the header line arrives as a normal row, recognise it by its content, take its last field, and copy it to the same file's rows. <b>Auto Loader never splits one file across micro-batches</b>, so a file's header and data rows are always in the same batch. One read of the files, nothing on the driver, nothing that grows. <b>The cost is a shuffle</b>: the window moves every row of the batch by <code>file_path</code> and sorts within each partition.</p>
 <pre><code>from pyspark.sql import functions as F, Window
 
 HEADER_FIRST = "SOURCE_ID"     <span class="muted"># text of the header's first field</span>
@@ -255,7 +255,7 @@ def enrich(batch, batch_id):
      .start())</code></pre>
       <ul>
         <li><b>Why a window, not a self-join:</b> deriving a <code>headers</code> DataFrame and a <code>rows</code> DataFrame from the same batch and joining them makes Spark <b>scan the batch's files twice</b>, once per side; scans aren't shared. The window reads the files once and shuffles rows by <code>file_path</code> so each file's header meets its rows.</li>
-        <li><b>Why a batch-wide step, not per-partition logic:</b> a large uncompressed CSV can be split into several tasks within the batch, and only the task reading the file's first block sees the header row. Grouping by <code>file_path</code> brings each file's timestamp to all its rows, whichever task read them. (<a href="#microbatch">How a micro-batch maps to jobs and tasks</a>)</li>
+        <li><b>Why a batch-wide step, not per-task logic:</b> a large uncompressed CSV can be split into several tasks within the batch, and only the task reading the file's first block sees the header row. Grouping by <code>file_path</code> brings each file's timestamp to all its rows, whichever task read them. If you can guarantee files are never split, <a href="#fix3">Fix 3</a> skips the shuffle. (<a href="#microbatch">How a micro-batch maps to jobs and tasks</a>)</li>
         <li><b>On classic compute</b> you can instead <code>batch.persist()</code>, build the small headers DataFrame, and <code>F.broadcast()</code>-join it to the rows (unpersist in a <code>finally</code>). That avoids shuffling every row. It <b>doesn't work on serverless</b>, where <code>cache()</code>, <code>persist()</code>, <code>unpersist()</code> and <code>checkpoint()</code> raise errors. The <code>F.broadcast()</code> join hint itself works on both.</li>
         <li><b>Triggers:</b> serverless notebooks and jobs support only <code>availableNow</code> (or the deprecated <code>once</code>); the default and <code>processingTime</code> triggers are rejected. Lakeflow pipelines manage triggers themselves and aren't affected.</li>
         <li>Identify the header by known header text, not by row order. Cast data columns to real types after the join.</li>
@@ -280,8 +280,58 @@ def enrich(batch, batch_id):
     (batch.join(F.broadcast(hdr), "file_path")                 <span class="muted"># broadcast hint: fine on serverless too</span>
           .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
           .write.mode("append").saveAsTable("bronze.orders"))</code></pre>
-      <p class="small muted">The batch is scanned twice here (once for <code>distinct()</code>, once for the join). On classic compute, <code>batch.persist()</code> avoids that; on serverless, caching isn't available, which is another reason to prefer Fix 1.</p>
-      <div class="callout trap"><div class="lbl">Does a pandas UDF fix this on its own?</div>Only partly. pandas UDFs speed up <b>CPU work per row</b> by vectorising it over Arrow batches (<a href="../data-abstractions/deep-dive.html#vectorised">Module 2 deep dive</a>). This problem is <b>I/O</b>: one S3 request per file. The gain here comes from running those requests in parallel on executors and only for new files, not from vectorisation, and every file is still read twice. Fix 1 avoids the second read entirely.</div>
+      <p class="small muted">The batch is scanned and parsed twice here (once for <code>distinct()</code>, once for the join). On classic compute, <code>batch.persist()</code> avoids that; on serverless, caching isn't available. Only the distinct file paths are shuffled, and the join is a broadcast, so data rows never move.</p>
+      <div class="callout trap"><div class="lbl">Check storage access first</div>On serverless and Unity Catalog shared compute, Python UDF code runs isolated and may not be able to open S3 paths with the workspace's storage credentials the way Spark's own readers can. Confirm <code>fsspec.open</code> works there before relying on this fix.</div>
+      <div class="callout trap"><div class="lbl">Does a pandas UDF fix this on its own?</div>Only partly. pandas UDFs speed up <b>CPU work per row</b> by vectorising it over Arrow batches (<a href="../data-abstractions/deep-dive.html#vectorised">Module 2 deep dive</a>). This problem is <b>I/O</b>: one S3 request per file. The gain in Fix 2 comes from running those requests in parallel on executors and only for new files, not from vectorisation, and every file is still read twice. Where a pandas UDF genuinely helps is Fix 3: moving rows cheaply into Python and running per-file logic inside each task, with no extra reads.</div>
+
+      <h3 id="fix3">Fix 3 (fastest, with a precondition): carry the header forward inside each task</h3>
+      <p>Spark splits a file across tasks only when it's <b>larger than <code>spark.sql.files.maxPartitionBytes</code></b> (128 MB by default) and splittable. When each file is read by a single task, that task meets the file's header row <b>first</b>, so it can fill in the timestamp itself: one read, no shuffle, no second scan. Read with <code>header=false</code> as in Fix 1.</p>
+<pre><code>HEADER_FIRST = "SOURCE_ID"
+
+def fill_file_ts(batches):                         <span class="muted"># one call per task; rows arrive in file order</span>
+    seen = {}                                      <span class="muted"># file_path -&gt; header value, kept across Arrow batches</span>
+    for pdf in batches:
+        is_hdr = pdf["c0"] == HEADER_FIRST
+        seen.update(zip(pdf.loc[is_hdr, "file_path"], pdf.loc[is_hdr, "c_last"]))
+        out = pdf.loc[~is_hdr].copy()
+        out["file_ts_raw"] = out["file_path"].map(seen)
+        if out["file_ts_raw"].isna().any():        <span class="muted"># this task never saw the header: the file was split</span>
+            raise ValueError("file split across tasks; use Fix 1 or raise maxPartitionBytes")
+        yield out.drop(columns=["c_last"])
+
+def enrich(batch, batch_id):
+    (batch.mapInPandas(fill_file_ts, out_schema)   <span class="muted"># narrow: same partitions, no shuffle</span>
+          .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
+          .write.mode("append").saveAsTable("bronze.orders"))</code></pre>
+      <ul>
+        <li><b>Cost:</b> one S3 read and one parse. Rows do travel JVM → Python → JVM as Arrow batches, but that's an in-memory, vectorised transfer, usually much cheaper than writing and fetching shuffle files.</li>
+        <li><b>The precondition:</b> no file is split across tasks. Guarantee it by keeping source files under 128 MB (common for feed files), raising <code>maxPartitionBytes</code> above the largest file, or using a format Spark can't split (gzip-compressed CSV, or <code>multiLine=true</code>). Each large file then becomes one big task.</li>
+        <li><b>The guard</b> fails the batch instead of silently writing nulls if a file ever is split. The failed batch replays from the offset log, so you can fix the setting or switch it to Fix 1 and rerun.</li>
+        <li>Works on serverless: <code>mapInPandas</code> is supported over Spark Connect.</li>
+      </ul>
+
+      <h3 id="compare-fixes">Comparing the fixes</h3>
+      <p>Neither fix is free. For a micro-batch of <i>B</i> bytes across <i>F</i> files:</p>
+      <div class="tbl"><table>
+        <thead><tr><th></th><th>Fix 1: window</th><th>Fix 2: header lookup</th><th>Fix 3: per-task pass</th></tr></thead>
+        <tbody>
+          <tr><td>S3 reads</td><td><i>B</i> once</td><td><i>B</i> twice, plus <i>F</i> first-line reads</td><td><i>B</i> once</td></tr>
+          <tr><td>CSV parsing</td><td>Once</td><td>Twice</td><td>Once</td></tr>
+          <tr><td>Shuffle</td><td>All rows, plus a sort</td><td>Distinct paths only (tiny)</td><td>None</td></tr>
+          <tr><td>Python on executors</td><td>No</td><td>Yes, opens S3 directly</td><td>Yes, Arrow transfer only</td></tr>
+          <tr><td>Correct when files are split across tasks</td><td>Yes</td><td>Yes</td><td>No: the guard fails the batch</td></tr>
+          <tr><td>Reads with <code>header=true</code></td><td>No</td><td>Yes</td><td>No</td></tr>
+        </tbody></table></div>
+      <div class="tbl"><table>
+        <thead><tr><th>Situation</th><th>Choose</th></tr></thead>
+        <tbody>
+          <tr><td>Files reliably under 128 MB, or gzip-compressed</td><td>Fix 3, with the guard</td></tr>
+          <tr><td>Large or unpredictable file sizes</td><td>Fix 1: always correct, pays one shuffle</td></tr>
+          <tr><td>Must read with <code>header=true</code>, and UDFs can reach S3</td><td>Fix 2: no row shuffle, but two scans</td></tr>
+          <tr><td>Classic compute, any file size</td><td>Fix 1, or <code>persist()</code> + broadcast join (one scan, no row shuffle)</td></tr>
+          <tr><td>You can change the source</td><td>Timestamp in the file name or a column: no special handling</td></tr>
+        </tbody></table></div>
+      <p>To decide between Fix 1 and Fix 2 on real data, compare the stage's <b>Shuffle Write</b> with its <b>Input</b> size in the Spark UI: a shuffle roughly the size of the input on fast local disks is often cheaper than re-reading and re-parsing it from S3, but measure.</p>
 
       <h3>Also</h3>
       <ul>
@@ -291,7 +341,7 @@ def enrich(batch, batch_id):
 
       <h3>Prevent</h3>
       <ul><li>Review any framework step that loops over files or calls cloud storage from the driver. Per-file metadata should come from the data Spark already reads (<code>_metadata</code> columns, header rows) or be computed on executors.</li></ul>
-      <div class="callout say"><div class="lbl">Say it in an interview (STAR)</div>"One source put its file timestamp in the CSV header instead of the file name. The first design read every file's header on the driver, built a map and broadcast it, so runtime grew with the bucket's total file count. I changed it to read the header line as a normal row, extract the timestamp per file and join it within the micro-batch, which works because Auto Loader never splits a file across batches. That removed the second read and the driver bottleneck entirely, and I switched Auto Loader to file notifications so discovery stopped scaling with the bucket too."</div>
+      <div class="callout say"><div class="lbl">Say it in an interview (STAR)</div>"One source put its file timestamp in the CSV header instead of the file name. The first design read every file's header on the driver, built a map and broadcast it, so runtime grew with the bucket's total file count. I changed it to read the header line as a normal row and copy its timestamp to the file's rows within the micro-batch, which works because Auto Loader never splits a file across batches. A window does that with one shuffle; since our files were small and never split across tasks, a mapInPandas pass could do it inside each task with no shuffle at all, guarded to fail if a file ever was split. That removed the second read and the driver bottleneck, and I switched Auto Loader to file notifications so discovery stopped scaling with the bucket too."</div>
     </div>
   </section>
 
@@ -321,7 +371,8 @@ def enrich(batch, batch_id):
     const rows=[
       ["Original: driver reads every file's header",(T+N).toLocaleString(),"Driver, one at a time",fmt((T+N)*L)],
       ["Fix 2: mapInPandas on new files",N.toLocaleString(),"Executors, in parallel",fmt(Math.ceil(N/C)*L)],
-      ["Fix 1: use the header row already read","0","Nothing extra","0 ms"]];
+      ["Fix 1: window over the rows already read","0","Pays a shuffle instead","0 ms"],
+      ["Fix 3: per-task pass over the rows already read","0","Nothing extra","0 ms"]];
     $("hRows").innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="num">${r[1]}</td><td>${r[2]}</td><td class="num">${r[3]}</td></tr>`).join("");
   }
   ["hTotal","hNew","hLat","hCores"].forEach(id=>$(id).addEventListener("input",calc)); calc();
