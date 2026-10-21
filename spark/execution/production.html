@@ -228,22 +228,20 @@ most recent failure: ... java.lang.NumberFormatException: For input string: "N/A
 
       <h3>Fix 1 (best): use the header row Spark already reads</h3>
       <p>Read with <code>header=false</code> so the header line arrives as a normal row, recognise it by its content, take its last field, and join it back to the same file's rows. <b>Auto Loader never splits one file across micro-batches</b>, so a file's header and data rows are always in the same batch, and a per-batch join is safe. No extra I/O, nothing on the driver, nothing that grows.</p>
-<pre><code>from pyspark.sql import functions as F
+<pre><code>from pyspark.sql import functions as F, Window
 
 HEADER_FIRST = "SOURCE_ID"     <span class="muted"># text of the header's first field</span>
+per_file = Window.partitionBy("file_path")
 
 def enrich(batch, batch_id):
-    batch.persist()                <span class="muted"># read the batch's files once; both branches below reuse it</span>
-    try:
-        headers = (batch.where(F.col("c0") == HEADER_FIRST)
-                        .select("file_path",
-                                F.to_timestamp("c_last", "yyyyMMddHHmmss").alias("file_generated_ts")))
-        rows = batch.where(F.col("c0") != HEADER_FIRST)
-        (rows.join(F.broadcast(headers), "file_path", "left")     <span class="muted"># one tiny row per file</span>
-             .drop("c_last")
-             .write.mode("append").saveAsTable("bronze.orders"))
-    finally:
-        batch.unpersist()
+    is_header = F.col("c0") == HEADER_FIRST
+    (batch
+       .withColumn("file_generated_ts",        <span class="muted"># the header's last field, copied to every row of its file</span>
+                   F.to_timestamp(F.max(F.when(is_header, F.col("c_last"))).over(per_file),
+                                  "yyyyMMddHHmmss"))
+       .where(~is_header)                      <span class="muted"># drop the header row itself</span>
+       .drop("c_last")
+       .write.mode("append").saveAsTable("bronze.orders"))
 
 (spark.readStream.format("cloudFiles")
      .option("cloudFiles.format", "csv")
@@ -252,11 +250,14 @@ def enrich(batch, batch_id):
      .load(src_path)
      .withColumn("file_path", F.col("_metadata.file_path"))
      .writeStream.foreachBatch(enrich)
+     .trigger(availableNow=True)              <span class="muted"># process the backlog, then stop; required on serverless</span>
      .option("checkpointLocation", checkpoint)
      .start())</code></pre>
       <ul>
-        <li><b>Why <code>persist()</code>:</b> <code>headers</code> and <code>rows</code> both come from <code>batch</code>, and Spark doesn't share scans between the two sides of a join. Without it, the batch's files would be read twice. An alternative that needs no cache is a window, <code>max(when(header, c_last)).over(Window.partitionBy("file_path"))</code>: one scan, but every row is shuffled by file.</li>
-        <li><b>Why a batch-wide join, not per-partition logic:</b> a large uncompressed CSV can be split into several tasks within the batch, and only the task reading the file's first block sees the header row. The broadcast join brings each file's timestamp to all its rows, whichever task reads them. (<a href="#microbatch">How a micro-batch maps to jobs and tasks</a>)</li>
+        <li><b>Why a window, not a self-join:</b> deriving a <code>headers</code> DataFrame and a <code>rows</code> DataFrame from the same batch and joining them makes Spark <b>scan the batch's files twice</b>, once per side; scans aren't shared. The window reads the files once and shuffles rows by <code>file_path</code> so each file's header meets its rows.</li>
+        <li><b>Why a batch-wide step, not per-partition logic:</b> a large uncompressed CSV can be split into several tasks within the batch, and only the task reading the file's first block sees the header row. Grouping by <code>file_path</code> brings each file's timestamp to all its rows, whichever task read them. (<a href="#microbatch">How a micro-batch maps to jobs and tasks</a>)</li>
+        <li><b>On classic compute</b> you can instead <code>batch.persist()</code>, build the small headers DataFrame, and <code>F.broadcast()</code>-join it to the rows (unpersist in a <code>finally</code>). That avoids shuffling every row. It <b>doesn't work on serverless</b>, where <code>cache()</code>, <code>persist()</code>, <code>unpersist()</code> and <code>checkpoint()</code> raise errors. The <code>F.broadcast()</code> join hint itself works on both.</li>
+        <li><b>Triggers:</b> serverless notebooks and jobs support only <code>availableNow</code> (or the deprecated <code>once</code>); the default and <code>processingTime</code> triggers are rejected. Lakeflow pipelines manage triggers themselves and aren't affected.</li>
         <li>Identify the header by known header text, not by row order. Cast data columns to real types after the join.</li>
         <li><code>foreachBatch</code> can replay a batch after a failure: make the write idempotent (Delta <code>txnAppId</code>/<code>txnVersion</code> options, or a MERGE).</li>
         <li><b>In a Lakeflow Declarative Pipeline:</b> land raw lines (header included, with <code>file_path</code>) in one streaming table, then join header rows to data rows on <code>file_path</code> in a downstream streaming table, with a watermark on an ingestion timestamp to bound the join state.</li>
@@ -274,15 +275,12 @@ def enrich(batch, batch_id):
         yield pdf
 
 def enrich(batch, batch_id):
-    batch.persist()                                            <span class="muted"># distinct() and the join both reuse one scan</span>
-    try:
-        files = batch.select("file_path").distinct()           <span class="muted"># this batch's files only</span>
-        hdr = files.mapInPandas(first_lines, "file_path string, file_ts_raw string")
-        (batch.join(F.broadcast(hdr), "file_path")
-              .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
-              .write.mode("append").saveAsTable("bronze.orders"))
-    finally:
-        batch.unpersist()</code></pre>
+    files = batch.select("file_path").distinct()               <span class="muted"># this batch's files only</span>
+    hdr = files.mapInPandas(first_lines, "file_path string, file_ts_raw string")
+    (batch.join(F.broadcast(hdr), "file_path")                 <span class="muted"># broadcast hint: fine on serverless too</span>
+          .withColumn("file_generated_ts", F.to_timestamp("file_ts_raw", "yyyyMMddHHmmss"))
+          .write.mode("append").saveAsTable("bronze.orders"))</code></pre>
+      <p class="small muted">The batch is scanned twice here (once for <code>distinct()</code>, once for the join). On classic compute, <code>batch.persist()</code> avoids that; on serverless, caching isn't available, which is another reason to prefer Fix 1.</p>
       <div class="callout trap"><div class="lbl">Does a pandas UDF fix this on its own?</div>Only partly. pandas UDFs speed up <b>CPU work per row</b> by vectorising it over Arrow batches (<a href="../data-abstractions/deep-dive.html#vectorised">Module 2 deep dive</a>). This problem is <b>I/O</b>: one S3 request per file. The gain here comes from running those requests in parallel on executors and only for new files, not from vectorisation, and every file is still read twice. Fix 1 avoids the second read entirely.</div>
 
       <h3>Also</h3>
