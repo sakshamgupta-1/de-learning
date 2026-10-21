@@ -44,7 +44,9 @@ is bigger than spark.driver.maxResultSize (1024.0 MiB)</code></pre>
       <p>Or the notebook hangs for minutes and then the Python process is killed.</p>
       <h3>Why it happens</h3>
       <ul>
-        <li><code>toPandas()</code> pulls <b>every row</b> to the driver, then builds a pandas DataFrame there. Data exists in the JVM, in transit and in pandas at the same moment, so peak memory is a multiple of the data size.</li>
+        <li><code>toPandas()</code> is an <b>action</b>, evaluated immediately. When Python reaches that line it blocks: Spark runs the whole lineage as a job (re-reading the source unless it's cached), pulls <b>every row</b> to the driver, and builds a pandas DataFrame there before the next line runs.</li>
+        <li>Data exists in the JVM, in transit and in pandas at the same moment, so peak memory is a multiple of the data size.</li>
+        <li>After the call it's plain, eager pandas: no lineage, no laziness, no link back to the Spark DataFrame.</li>
         <li>It's often called "just to look" at a table, or on data that was small in development and grew in production.</li>
       </ul>
       <h3>How to confirm</h3>
@@ -59,6 +61,16 @@ is bigger than spark.driver.maxResultSize (1024.0 MiB)</code></pre>
         <li>For handing data to another system, write it to a table or files instead.</li>
         <li>Enable Arrow (<code>spark.sql.execution.arrow.pyspark.enabled=true</code>). It cuts conversion time and overhead, but every row still lands on the driver.</li>
       </ul>
+      <h3>Safer alternatives</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Call</th><th>Lazy or eager</th><th>What reaches the driver</th></tr></thead>
+        <tbody>
+          <tr><td><code>df.toPandas()</code></td><td>Eager (action)</td><td>Every row, as one pandas DataFrame</td></tr>
+          <tr><td><code>df.limit(1000).toPandas()</code></td><td>Eager (action)</td><td>Only 1,000 rows; usually reads just part of the data</td></tr>
+          <tr><td><code>df.toLocalIterator()</code></td><td>Eager, one partition at a time as you iterate</td><td>About one partition in memory at a time</td></tr>
+          <tr><td><code>df.pandas_api()</code></td><td>Lazy</td><td>Nothing: a pandas-style API over distributed data</td></tr>
+          <tr><td><code>df.write…</code></td><td>Eager (action)</td><td>Nothing: executors write the data directly</td></tr>
+        </tbody></table></div>
       <h3>Prevent</h3>
       <ul><li>Team rule: <code>toPandas()</code> only after an aggregation or a <code>limit</code>, never on raw tables.</li></ul>
       <div class="callout say"><div class="lbl">Say it in an interview</div>"toPandas collects the whole DataFrame to the driver and builds a pandas copy, so it's a driver OOM waiting to happen on large data. I reduce the data in Spark first, convert only small results with Arrow enabled, and write anything big to storage instead."</div>
@@ -117,6 +129,7 @@ Attempting non-optimization as
       <ul>
         <li>Rewrite with built-in functions where possible: the biggest win.</li>
         <li>Otherwise use a <b>pandas UDF</b>: Arrow batches and vectorised pandas or NumPy code (<a href="deep-dive.html#boundary">why it's faster</a>).</li>
+        <li>If the slow part is <b>I/O per item</b> (opening files, calling APIs) rather than CPU, vectorising won't help much; parallelise it on executors and avoid repeat reads. Real example: <a href="../execution/production.html#file-header-case">reading per-file header values</a>.</li>
         <li>On Spark 3.5+, an <b>Arrow-optimised Python UDF</b> (<code>@udf(useArrow=True)</code>) keeps row-wise code but speeds up data transfer.</li>
         <li>Apply UDFs after filtering, so fewer rows reach Python.</li>
       </ul>
@@ -203,6 +216,7 @@ in Spark Connect as it depends on the JVM.
       <details><summary>Why are DataFrames faster than RDDs, especially in PySpark?</summary><div>Catalyst understands the query, so it pushes down filters, prunes columns and picks join strategies; Tungsten uses compact binary rows and generated code. In PySpark, RDD lambdas also pickle every row to Python workers and back, while DataFrame operations stay in the JVM.</div></details>
       <details><summary>When would you still use an RDD?</summary><div>Unstructured data needing custom parsing, low-level partitioning control, or legacy code. Even then, pandas UDFs or mapInPandas often do the job better, and RDDs don't work on Spark Connect.</div></details>
       <details><summary>What's the difference between a Spark DataFrame and a pandas DataFrame?</summary><div>Spark: distributed, lazy, immutable, no index, scales to any size. pandas: single machine, eager, mutable, indexed, limited by one machine's memory.</div></details>
+      <details><summary>Is <code>toPandas()</code> lazy or eager? Does Python wait for it?</summary><div>Eager: it's an action. When Python reaches the line, Spark runs the lineage as a job, collects every row to the driver and builds the pandas DataFrame; Python waits for all of that before the next line. Upstream errors surface on this line. Afterwards the result is plain eager pandas with no link to the Spark plan, and calling another action on the original DataFrame recomputes it unless it's cached.</div></details>
       <details><summary>What happens when you call toPandas()?</summary><div>Spark runs the plan, collects every row to the driver, and builds a pandas DataFrame there. With Arrow enabled the transfer is columnar and much faster, but the full data still has to fit in driver memory.</div></details>
       <details><summary>What is Apache Arrow and why does Spark use it?</summary><div>A columnar in-memory format shared by the JVM and Python. Spark uses it to move data between them in batches without per-row serialisation: in toPandas, createDataFrame from pandas, and pandas UDFs.</div></details>
       <details><summary>pandas UDF vs pandas API on Spark: what's the difference?</summary><div>A pandas UDF runs your own pandas function on executors over batches or groups of a Spark DataFrame. The pandas API on Spark is a pandas-compatible interface whose calls are translated into Spark plans; you don't write per-batch functions at all.</div></details>

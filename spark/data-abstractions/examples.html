@@ -199,7 +199,7 @@ def with_tax(amount: pd.Series) -> pd.Series:
     return amount * 1.05
 
 df.withColumn("amount_with_tax", with_tax("amount"))</code></pre></div></li>
-      <li><div><b><code>mapInPandas</code></b> when you need whole batches of rows, for example scoring a model, without grouping.
+      <li><div><b><code>mapInPandas</code></b> when you need whole batches of rows, for example scoring a model, without grouping. (Real-world use: <a href="../execution/production.html#file-header-case">reading a value from each new file's header on executors</a>.)
 <pre><code>def score(batches):
     for pdf in batches:                    <span class="muted"># an iterator of pandas DataFrames</span>
         pdf["score"] = model.predict(pdf[["amount"]])
