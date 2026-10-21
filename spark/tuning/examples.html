@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Tuning: Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="index.html" aria-current="page">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Tuning &amp; debugging</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 5 of 5 · Examples</p>
+  <h1>Size it, then fix the skew</h1>
+  <p class="lede">Two calculators for the numbers interviewers ask you to work out on a whiteboard, and a side-by-side run that shows why salting a hot key shortens a stage.</p>
+  <div class="toc">
+    <a href="#partitions">Partition sizing</a><a href="#executors">Executor sizing</a><a href="#salting">Salting a hot key</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="partitions">
+    <h2>Partition sizing</h2>
+    <p>Rule of thumb: roughly <b>100–200 MB per shuffle partition</b>, and at least 2–3 tasks per core so a slow task doesn't leave cores idle. Rounding the count to a multiple of the cores keeps the last wave full (waves are explained in <a href="../architecture/index.html">Module 1</a>).</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="ps">Data to shuffle (GB)<input id="ps" type="number" min="1" value="500"></label>
+        <label for="pt">Target partition size (MB)<input id="pt" type="number" min="16" value="128"></label>
+        <label for="pc">Total cores in cluster<input id="pc" type="number" min="1" value="160"></label>
+      </div>
+      <div class="out" id="pout" aria-live="polite"></div>
+    </div>
+<pre><code>spark.conf.set("spark.sql.shuffle.partitions", 4000)
+# with AQE on, you can instead set a high initial number and a target size:
+spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128m")</code></pre>
+    <p class="small muted">The shuffle size to plug in is the stage's <b>Shuffle Write</b> in the Spark UI, not the input file size: compressed columnar files grow when decoded into rows.</p>
+  </section>
+
+  <section id="executors">
+    <h2>Executor sizing</h2>
+    <p>The classic YARN/Kubernetes recipe: about <b>5 cores per executor</b> (good I/O throughput without too many threads sharing one heap), <b>1 core and about 1 GB per node</b> left for the OS and daemons, and about <b>10% of executor memory for overhead</b> (<code>spark.executor.memoryOverhead</code> defaults to 10%, minimum 384 MB).</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="en">Worker nodes<input id="en" type="number" min="1" value="10"></label>
+        <label for="ec">Cores per node<input id="ec" type="number" min="2" value="16"></label>
+        <label for="em">Memory per node (GB)<input id="em" type="number" min="4" value="64"></label>
+        <label for="ex">Cores per executor<input id="ex" type="number" min="1" max="16" value="5"></label>
+      </div>
+      <div class="out" id="eout" aria-live="polite"></div>
+      <p class="small muted" style="margin-bottom:0">One executor is subtracted for the YARN application master in cluster mode. Execution memory per task uses the defaults <code>spark.memory.fraction=0.6</code> and <code>storageFraction=0.5</code>, ignoring the 300 MB reserved: an approximation. On Databricks classic compute there's one executor per worker, so you choose instance type and worker count; on serverless you don't size executors at all.</p>
+    </div>
+    <h3>How to choose, in an interview</h3>
+    <ul>
+      <li><b>Too-fat executors</b> (one executor × 15 cores × 60 GB): long GC pauses on a big heap, and storage-client contention with many threads.</li>
+      <li><b>Too-thin executors</b> (1 core each): every executor holds its own copy of broadcasts, more JVM overhead, and more executors for the driver to track.</li>
+      <li><b>Memory-hungry stages</b> (big joins, wide rows): fewer cores per executor or memory-optimised instances, so each task gets more memory.</li>
+      <li><b>CPU-bound stages</b> (parsing, UDFs, compression): compute-optimised instances, more cores.</li>
+      <li><b>Variable load:</b> dynamic allocation or autoscaling with sensible minimum and maximum (<a href="../architecture/deep-dive.html#dynamic">Module 1 deep dive</a>).</li>
+    </ul>
+  </section>
+
+  <section id="salting">
+    <h2>Salting a hot key</h2>
+    <p>One key holds a large share of the rows, so after the shuffle one task does most of the work and the stage waits for it. <b>Salting</b> adds a random number (0 to N−1) to the hot side's key, so that key's rows spread over N partitions, and copies each row of the other side N times so every salted key still finds its match. Press Play to run the same stage on 4 cores both ways.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg id="saltSvg" viewBox="0 0 840 420" role="img" aria-labelledby="saltT">
+  <title id="saltT">Task timeline on four cores: one skewed task holds up the stage; with salting, the hot key is split into six smaller tasks and the stage finishes sooner</title>
+  <text class="th" x="20" y="28">Skewed: one hot key in one task</text>
+  <text class="th" x="20" y="232">Salted: the hot key split 6 ways</text>
+  <g id="laneLbls"></g>
+  <g id="axisA"></g><g id="axisB"></g>
+  <g id="tasksA"></g><g id="tasksB"></g>
+  <line id="cursorA" class="lna" x1="110" y1="40" x2="110" y2="190"/>
+  <line id="cursorB" class="lna" x1="110" y1="244" x2="110" y2="394"/>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="sim-ctrl">
+    <button class="btn" id="saltPlay">Play</button>
+    <button class="btn ghost" id="saltReset">Reset</button>
+    <span class="small">Blue: normal tasks · red: the hot-key task · orange: hot key after salting. Timing is illustrative, not a benchmark.</span>
+  </div>
+  <div class="out lanes" aria-live="polite">
+    <div class="lane-a"><b id="saltTA">0 min</b><span>Skewed: elapsed</span></div>
+    <div class="lane-a"><b id="saltDA">0 / 12</b><span>Skewed: tasks done</span></div>
+    <div class="lane-b"><b id="saltTB">0 min</b><span>Salted: elapsed</span></div>
+    <div class="lane-b"><b id="saltDB">0 / 17</b><span>Salted: tasks done</span></div>
+  </div>
+  <p>The total work is the same in both runs. What changes is that no single task is longer than the rest put together, so the 4 cores stay busy and the stage ends sooner. In the skewed run, three cores sit idle for most of the stage.</p>
+
+  <h3>The code</h3>
+<pre><code>from pyspark.sql import functions as F
+N = 6   # salt buckets: enough to bring the hot key near the median partition size
+
+# Join: salt the big (skewed) side randomly, copy the small side N times
+big   = orders.withColumn("salt", (F.rand() * N).cast("int"))
+small = customers.withColumn("salt", F.explode(F.array([F.lit(i) for i in range(N)])))
+joined = big.join(small, ["cust_id", "salt"]).drop("salt")
+
+# Aggregation: aggregate per (key, salt) first, then per key
+partial = big.groupBy("cust_id", "salt").agg(F.sum("amount").alias("s"))
+final   = partial.groupBy("cust_id").agg(F.sum("s").alias("amount"))</code></pre>
+  <ul>
+    <li><b>Cost of salting a join:</b> the small side grows N times. Salt only the hot keys (salt 0 for everything else) when the small side isn't tiny.</li>
+    <li><b>Two-step aggregation</b> works for sums, counts, min and max. Averages need sum and count carried separately; exact distinct counts don't combine this way.</li>
+    <li><b>Try the cheaper fixes first:</b> filter <code>NULL</code> or default keys, let AQE split skewed sort-merge join partitions, or broadcast the small side. Salting is for when those don't apply. See <a href="production.html#s-skew">data skew in production</a>.</li>
+  </ul>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>A stage shuffles 1 TB and you have 200 cores. How many shuffle partitions?</summary><div>At about 128 MB each, 1 TB ÷ 128 MB ≈ 8,192. Rounded to a multiple of 200 cores that's 8,200, about 41 waves. Anything from about 5,000 to 10,000 is defensible; 200 (the default) would make 5 GB partitions and spill heavily.</div></details>
+      <details><summary>Why not one executor per node with all 16 cores?</summary><div>One huge heap means long GC pauses, and 16 threads sharing one storage client can bottleneck I/O. Around 4–5 cores per executor is the usual balance. On Databricks classic compute this choice is made for you (one executor per worker), so you tune instance type instead.</div></details>
+      <details><summary>You salt with N = 100 and the job gets slower. Why?</summary><div>The small side was copied 100 times, so the join input grew a lot, and the shuffle now has many more rows. Pick N so the hot key's share comes down to about the median partition size, and salt only the hot keys.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const fmt=n=>n.toLocaleString("en-US",{maximumFractionDigits:1});
+  function pcalc(){const gb=Math.max(0,+$("ps").value||0),mb=Math.max(1,+$("pt").value||128),c=Math.max(1,+$("pc").value||1);
+    const p=Math.max(1,Math.ceil(gb*1024/mb)),r=Math.ceil(p/c)*c;
+    $("pout").innerHTML=[[fmt(p),"partitions at target size"],[fmt(r),"rounded to a multiple of cores"],[fmt(r/c),"waves of tasks"],[fmt(gb*1024/r)+" MB","actual size per partition"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("")}
+  ["ps","pt","pc"].forEach(id=>$(id).addEventListener("input",pcalc));pcalc();
+
+  function ecalc(){const n=Math.max(1,+$("en").value||1),c=Math.max(2,+$("ec").value||2),m=Math.max(4,+$("em").value||4),x=Math.max(1,+$("ex").value||1);
+    const epn=Math.max(1,Math.floor((c-1)/x)),total=Math.max(1,n*epn-1),perExec=(m-1)/epn,heap=Math.max(1,Math.floor(perExec/1.10)),ovh=Math.max(0.384,perExec-heap);
+    $("eout").innerHTML=[[epn,"executors per node"],[total,"total executors (minus 1 for the AM)"],[heap+" GB","spark.executor.memory"],[fmt(ovh)+" GB","≈ memoryOverhead"],[total*x,"total task slots"],[fmt(heap*0.6*0.5/x)+" GB","execution memory per task (approx.)"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("")}
+  ["en","ec","em","ex"].forEach(id=>$(id).addEventListener("input",ecalc));ecalc();
+
+  /* salting: greedy list scheduling of the same stage on 4 cores */
+  const NS="http://www.w3.org/2000/svg",X0=110,S=26,CORES=4,LH=30,GAP=7;
+  const A=[3,3,3,3,24,3,3,3,3,3,3,3].map((d,i)=>({d,cls:i===4?"bxr":"bxb"}));
+  const B=[3,3,3,3,4,4,4,4,4,4,3,3,3,3,3,3,3].map((d,i)=>({d,cls:i>=4&&i<10?"bxa":"bxb"}));
+  function schedule(ts){const free=new Array(CORES).fill(0);ts.forEach(t=>{let c=0;for(let i=1;i<CORES;i++)if(free[i]<free[c])c=i;t.core=c;t.start=free[c];free[c]+=t.d});return Math.max(...free)}
+  const endA=schedule(A),endB=schedule(B),END=Math.max(endA,endB);
+  function el(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);if(text!=null)e.textContent=text;parent.appendChild(e);return e}
+  function draw(ts,y0,gTasks,gAxis){
+    for(let c=0;c<CORES;c++){el("rect",{class:"bx2",x:X0,y:y0+c*(LH+GAP),width:END*S,height:LH,rx:4},gAxis);el("text",{class:"tm",x:X0-10,y:y0+c*(LH+GAP)+20,"text-anchor":"end"},$("laneLbls"),"core "+(c+1))}
+    for(let t=0;t<=END;t+=3)el("text",{class:"tm",x:X0+t*S,y:y0+CORES*(LH+GAP)+14,"text-anchor":"middle"},gAxis,t+" min");
+    ts.forEach(t=>{t.r=el("rect",{class:t.cls,x:X0+t.start*S+1,y:y0+t.core*(LH+GAP)+2,width:0,height:LH-4,rx:3},gTasks)});
+  }
+  draw(A,40,$("tasksA"),$("axisA"));draw(B,244,$("tasksB"),$("axisB"));
+  let t=0,playing=false,last=0,raf=0;
+  const reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function render(){
+    [[A,endA,"A"],[B,endB,"B"]].forEach(([ts,end,k])=>{
+      const now=Math.min(t,end);let done=0;
+      ts.forEach(x=>{const w=Math.max(0,Math.min(now-x.start,x.d))*S;x.r.setAttribute("width",Math.max(0,w-2));if(now>=x.start+x.d)done++});
+      $("cursor"+k).setAttribute("x1",X0+now*S);$("cursor"+k).setAttribute("x2",X0+now*S);
+      $("saltT"+k).textContent=fmt(now)+" min"+(now>=end?" (done)":"");
+      $("saltD"+k).textContent=done+" / "+ts.length;
+    });
+  }
+  function frame(ts){if(!playing)return;const dt=(ts-last)/1000;last=ts;t=Math.min(END,t+dt*3);render();if(t>=END){playing=false;$("saltPlay").textContent="Replay";return}raf=requestAnimationFrame(frame)}
+  $("saltPlay").addEventListener("click",()=>{
+    if(playing){playing=false;cancelAnimationFrame(raf);$("saltPlay").textContent="Play";return}
+    if(t>=END)t=0;
+    if(reduce){t=END;render();$("saltPlay").textContent="Replay";return}
+    playing=true;$("saltPlay").textContent="Pause";last=performance.now();raf=requestAnimationFrame(frame);
+  });
+  $("saltReset").addEventListener("click",()=>{playing=false;cancelAnimationFrame(raf);t=0;render();$("saltPlay").textContent="Play"});
+  render();
+})();
+</script>
+</body></html>

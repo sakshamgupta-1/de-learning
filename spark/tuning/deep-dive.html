@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Tuning: Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="index.html" aria-current="page">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Tuning &amp; debugging</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 5 of 5 · Deep dive</p>
+  <h1>The tuning levers, in depth</h1>
+  <p class="lede">How to cut shuffles, what <code>repartition</code> and <code>coalesce</code> really do to your stages, when caching pays off, and the GC, Python and platform details that decide the last 20%.</p>
+  <div class="toc">
+    <a href="#shuffle">Reducing shuffle</a><a href="#repartition">repartition vs coalesce</a><a href="#coalesce-trap">The coalesce(1) trap</a><a href="#cache">Cache vs persist</a><a href="#gc">GC and Python</a><a href="#platform">Databricks specifics</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="shuffle">
+    <h2>Reducing shuffle: the checklist</h2>
+    <p>Every shuffle writes data to local disk, sends it over the network and usually sorts it. Work down this list in order; the first items save the most.</p>
+    <ol class="rail">
+      <li><div><b>Read less.</b> Filter and select columns as early as possible, and make sure filters reach the scan (<code>PushedFilters</code>, <code>PartitionFilters</code> in <a href="../optimizer/index.html#pushdown">Module 4</a>).</div></li>
+      <li><div><b>Broadcast small sides.</b> Raise <code>autoBroadcastJoinThreshold</code> or add a hint for dimension tables up to a few hundred MB, within driver and executor memory.</div></li>
+      <li><div><b>Pre-aggregate before joining.</b> Aggregate the fact table to the grain you need, then join the smaller result.</div></li>
+      <li><div><b>Remove accidental shuffles</b> (see the table below).</div></li>
+      <li><div><b>Shuffle once, reuse.</b> Consecutive joins or aggregations on the same key reuse the existing partitioning. Bucketing, or co-located clustering, avoids the shuffle for large tables joined repeatedly on the same key.</div></li>
+      <li><div><b>Right-size what's left.</b> Let AQE coalesce, or set <code>spark.sql.shuffle.partitions</code> so each shuffle partition is roughly 100–200 MB (<a href="examples.html#partitions">calculator</a>).</div></li>
+    </ol>
+    <h3>Accidental shuffles</h3>
+    <div class="tbl"><table>
+      <thead><tr><th>Pattern</th><th>Why it shuffles</th><th>Instead</th></tr></thead>
+      <tbody>
+        <tr><td><code>distinct()</code> "just in case"</td><td>Full shuffle of every column</td><td>Fix duplicates at the source, or <code>dropDuplicates(keys)</code></td></tr>
+        <tr><td><code>orderBy</code> before a write</td><td>Range-partitioning shuffle plus a sort</td><td>Drop it; table readers don't see row order. Use clustering for data skipping</td></tr>
+        <tr><td><code>repartition(n)</code> right before a join</td><td>The join reshuffles by its key anyway</td><td>Remove it, or <code>repartition("join_key")</code> if you reuse that layout</td></tr>
+        <tr><td>Windows with different <code>partitionBy</code></td><td>Each new partitioning is a new shuffle</td><td>Group windows that share a <code>partitionBy</code></td></tr>
+        <tr><td><code>count()</code> for logging between steps</td><td>Not a shuffle, but a separate job that recomputes the lineage</td><td>Read metrics from the write, or log less often</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="repartition">
+    <h2>repartition vs coalesce</h2>
+    <p>Both change the number of partitions. <code>repartition</code> is a <b>wide</b> transformation: a full shuffle that produces evenly sized partitions. <code>coalesce</code> is <b>narrow</b>: it merges neighbouring partitions without a shuffle, so it's cheap but keeps any unevenness. Switch between them on the same six input partitions:</p>
+    <div class="seg" role="tablist" aria-label="Operation" id="rcTabs">
+      <button role="tab" aria-selected="true" data-k="rep">repartition(3)</button>
+      <button role="tab" aria-selected="false" data-k="coa">coalesce(3)</button>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg id="rcSvg" viewBox="0 0 820 300" role="img" aria-labelledby="rcT">
+  <title id="rcT">Six input partitions of different sizes become three output partitions; repartition shuffles into equal sizes, coalesce merges neighbours</title>
+  <text class="th" x="20" y="26">Input: 6 partitions</text>
+  <text class="th" x="520" y="26" id="rcOutT">Output</text>
+  <g id="rcLines"></g><g id="rcIn"></g><g id="rcOut"></g>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="out" aria-live="polite" id="rcOutStats"></div>
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>repartition(n) / repartition(col)</th><th>coalesce(n)</th></tr></thead>
+    <tbody>
+      <tr><td>Shuffle</td><td>Yes (wide, new stage)</td><td>No (narrow, same stage)</td></tr>
+      <tr><td>Direction</td><td>Increase or decrease</td><td>Decrease only (asking for more is a no-op)</td></tr>
+      <tr><td>Result</td><td>Even sizes; by column, the same key lands in the same partition</td><td>Uneven if the inputs were uneven</td></tr>
+      <tr><td>Use for</td><td>Fixing too few or skewed partitions, more parallelism, laying out data before a <code>partitionBy</code> write</td><td>Cutting the number of output files cheaply after a selective filter</td></tr>
+    </tbody></table></div>
+  <p>Related: <code>repartitionByRange(col)</code> range-partitions by sampled boundaries (sorted, contiguous ranges per partition), and the <code>REBALANCE</code> SQL hint asks AQE to even out partition sizes before a write.</p>
+
+  <section id="coalesce-trap">
+    <h2>The coalesce(1) trap</h2>
+    <p>Because <code>coalesce</code> adds no stage boundary, its reduced parallelism applies to the <b>whole stage it sits in</b>, not just the write. Take <code>df.groupBy("k").agg(...).coalesce(1).write…</code>:</p>
+    <div class="seg" role="tablist" aria-label="Ending" id="trapTabs">
+      <button role="tab" aria-selected="true" data-k="c1">.coalesce(1)</button>
+      <button role="tab" aria-selected="false" data-k="r1">.repartition(1)</button>
+    </div>
+    <div class="scn" id="trapView" aria-live="polite"></div>
+    <p>If the work before the final write is heavy, <code>repartition(1)</code> is faster: it costs one small extra shuffle but keeps the heavy work parallel. Better still, ask whether you need a single file at all.</p>
+  </section>
+
+  <section id="cache">
+    <h2>Cache vs persist</h2>
+    <ul>
+      <li><code>cache()</code> is <code>persist()</code> with the default level: <code>MEMORY_ONLY</code> for RDDs, memory-and-disk for DataFrames (<code>MEMORY_AND_DISK</code>; PySpark reports it as <code>MEMORY_AND_DISK_DESER</code>).</li>
+      <li>Caching is <b>lazy</b>: nothing is stored until an action runs. The <b>Storage</b> tab shows what's cached and what fraction fits.</li>
+      <li>Cached blocks live in the <b>storage</b> pool of unified memory and can be evicted when execution needs room (<a href="../architecture/index.html#memory">Module 1</a>).</li>
+      <li>Call <code>unpersist()</code> when done.</li>
+    </ul>
+    <div class="tbl"><table>
+      <thead><tr><th>Storage level</th><th>Where</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td><code>MEMORY_ONLY</code></td><td>Heap; partitions that don't fit are recomputed</td><td>Small, hot RDDs that are cheap to recompute</td></tr>
+        <tr><td><code>MEMORY_AND_DISK</code></td><td>Heap, overflow to local disk</td><td>The usual choice for DataFrames</td></tr>
+        <tr><td><code>DISK_ONLY</code></td><td>Local disk</td><td>Large and expensive to recompute, memory is tight</td></tr>
+        <tr><td><code>*_SER</code> (Scala/Java)</td><td>Serialised in memory</td><td>Less memory, more CPU. DataFrame caches are already compact columnar</td></tr>
+        <tr><td><code>*_2</code></td><td>Replicated on two executors</td><td>Losing an executor must not force recomputation</td></tr>
+        <tr><td><code>OFF_HEAP</code></td><td>Off-heap memory</td><td>Large caches without GC pressure; needs off-heap memory configured</td></tr>
+      </tbody></table></div>
+    <h3>When caching pays off, and when it doesn't</h3>
+    <ul>
+      <li><b>Cache</b> when a DataFrame is <b>reused by several actions</b> and is <b>expensive to recompute</b> (joins, heavy parsing, remote sources).</li>
+      <li><b>Don't cache</b> something used once, or cheap to re-read from columnar files: caching costs a full materialisation and memory that execution could use.</li>
+      <li><b>To cut long lineage</b> in iterative jobs, use <code>checkpoint()</code> (reliable storage) or <code>localCheckpoint()</code> (executor-local, faster, lost with the executor), or write an intermediate table.</li>
+    </ul>
+    <div class="callout trap"><div class="lbl">Not on Databricks serverless</div>On serverless compute, <code>cache()</code>, <code>persist()</code>, <code>unpersist()</code> and <code>checkpoint()</code> raise errors. Write an intermediate table, or restructure so the data is read once. Databricks' <b>disk cache</b> still speeds up repeated Parquet and Delta reads automatically.</div>
+  </section>
+
+  <section id="gc">
+    <h2>GC and Python overhead</h2>
+    <h3>Garbage collection</h3>
+    <ul>
+      <li><b>Signal:</b> the Executors tab highlights GC time over about 10% of task time; the task table has a <b>GC Time</b> column.</li>
+      <li><b>Causes:</b> too much data per task, caching deserialised objects, RDD code creating many objects, very large heaps.</li>
+      <li><b>Fixes:</b> smaller partitions; DataFrames instead of RDDs (Tungsten stores rows as compact binary, not objects); smaller executors; G1GC (the default collector on modern JVMs) for large heaps.</li>
+    </ul>
+    <h3>Python</h3>
+    <ul>
+      <li>Plain Python UDFs move every row from the JVM to a Python worker and back, one row at a time. Prefer built-in functions; use pandas UDFs (Arrow batches) when you need Python. Details in <a href="../data-abstractions/deep-dive.html#boundary">Module 2</a>.</li>
+      <li>Python workers use memory <b>outside the JVM heap</b>, counted against <code>memoryOverhead</code>. A container killed with healthy heap usage often means Python memory.</li>
+      <li>On the driver, <code>collect()</code> and <code>toPandas()</code> pull everything into one process (<a href="production.html#s-driver">driver OOM</a>).</li>
+    </ul>
+  </section>
+
+  <section id="platform">
+    <h2>Databricks specifics</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Area</th><th>Open-source Spark</th><th>Databricks</th></tr></thead>
+      <tbody>
+        <tr><td>Executor sizing</td><td>You set cores, memory and overhead</td><td>Classic: one executor per worker, choose instance type. Serverless: managed for you</td></tr>
+        <tr><td>Shuffle partitions</td><td><code>spark.sql.shuffle.partitions</code> + AQE coalescing</td><td>Also <code>spark.sql.shuffle.partitions=auto</code> (auto-optimized shuffle)</td></tr>
+        <tr><td>Execution engine</td><td>Tungsten whole-stage codegen</td><td>Photon, a vectorised C++ engine, where supported</td></tr>
+        <tr><td>Small files</td><td>Manual compaction</td><td>Optimized writes, auto-compaction, predictive optimization</td></tr>
+        <tr><td>Layout</td><td>Partitioning, bucketing</td><td>Liquid clustering instead of partitioning + Z-ORDER</td></tr>
+        <tr><td>Caching</td><td><code>cache()</code> / <code>persist()</code></td><td>Disk cache automatic; <code>cache()</code> unavailable on serverless</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>You filter 1 TB down to 5 GB and write it. It produces 8,000 tiny files. Fix?</summary><div><code>coalesce(n)</code> before the write: the filter left the data in the original 8,000 partitions, and coalescing merges them without a shuffle. Choose n for files of roughly 128 MB–1 GB (here about 20–40).</div></details>
+      <details><summary>When is <code>repartition(col)</code> before a write the right call?</summary><div>When writing with <code>partitionBy(col)</code>: without it, every task can write a file into every partition folder (tasks × folders files). Repartitioning by the same column puts each folder's rows in few tasks.</div></details>
+      <details><summary>A DataFrame is cached but the Storage tab shows 40% cached. What does that mean?</summary><div>Only 40% of the partitions fit (or survived eviction). With <code>MEMORY_ONLY</code> the rest are recomputed on each use; with <code>MEMORY_AND_DISK</code> they'd be on disk. Either cache less (fewer columns, filtered first) or give storage more room.</div></details>
+      <details><summary>Your pipeline runs on serverless and uses <code>df.cache()</code> to avoid reading a source twice. What now?</summary><div>It will fail on serverless. Write the expensive intermediate result to a table and read it back, or restructure into one pass (for example, a window instead of a self-join).</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg";
+  function el(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);if(text!=null)e.textContent=text;parent.appendChild(e);return e}
+  const IN=[40,120,20,90,10,60],SC=2.4,TOT=IN.reduce((a,b)=>a+b,0);
+  const MODES={
+    rep:{title:"Output: 3 even partitions",out:[TOT/3,TOT/3,TOT/3],map:null,shuffle:TOT,stage:"Yes"},
+    coa:{title:"Output: 3 merged partitions",out:[160,110,70],map:[0,0,1,1,2,2],shuffle:0,stage:"No"}
+  };
+  const inY=i=>42+i*40,outY=i=>62+i*76;
+  function rc(k){
+    const m=MODES[k];["rcIn","rcOut","rcLines"].forEach(id=>{$(id).innerHTML=""});
+    $("rcOutT").textContent=m.title;
+    IN.forEach((v,i)=>{el("rect",{class:"bxb",x:20,y:inY(i),width:v*SC,height:28,rx:4},$("rcIn"));el("text",{class:"tm",x:28+v*SC,y:inY(i)+19},$("rcIn"),v+" MB")});
+    m.out.forEach((v,j)=>{el("rect",{class:k==="rep"?"bxa":"bxo",x:520,y:outY(j),width:v*SC*0.5,height:40,rx:4},$("rcOut"));el("text",{class:"tm",x:528+v*SC*0.5,y:outY(j)+25},$("rcOut"),Math.round(v)+" MB")});
+    IN.forEach((v,i)=>{const x1=380;
+      (m.map?[m.map[i]]:[0,1,2]).forEach(j=>el("line",{class:k==="rep"?"lna dash":"ln",x1:x1,y1:inY(i)+14,x2:516,y2:outY(j)+20},$("rcLines")))});
+    const mx=Math.max(...m.out),mn=Math.min(...m.out);
+    $("rcOutStats").innerHTML=[[m.shuffle+" MB","shuffled over the network"],[m.stage,"new stage boundary"],[Math.round(mx)+" / "+Math.round(mn)+" MB","largest / smallest output"],[(mx/mn).toFixed(1)+"×","size imbalance"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("");
+  }
+  const TRAP={
+    c1:{stages:[["Stage 1","Scan + partial aggregate","400 tasks","bxb"],["Stage 2","Final aggregate + write","1 task","bad"]],
+        note:"coalesce(1) has no shuffle of its own, so Spark merges the post-shuffle stage into one partition. The final aggregation of all the shuffled data runs in a single task on a single core. The map side still runs in parallel because the groupBy's shuffle is a stage boundary."},
+    r1:{stages:[["Stage 1","Scan + partial aggregate","400 tasks","bxb"],["Stage 2","Final aggregate","200 tasks","ok"],["Stage 3","Write","1 task","bxb"]],
+        note:"repartition(1) adds a shuffle, so the final aggregation keeps its 200 parallel tasks. Only the already-aggregated, much smaller result is moved to one task for the write."}
+  };
+  function trap(k){const t=TRAP[k];
+    $("trapView").innerHTML=`<div class="counters">${t.stages.map(s=>`<span class="chip ${s[3]==="bad"?"bad":s[3]==="ok"?"ok":"blue"}">${s[0]} · ${s[1]} · <b>${s[2]}</b></span>`).join("")}</div><p class="note">${t.note}</p>`}
+  function tabs(id,fn){const box=$(id);box.querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{box.querySelectorAll("button").forEach(x=>x.setAttribute("aria-selected",x===b));fn(b.dataset.k)}))}
+  tabs("rcTabs",rc);tabs("trapTabs",trap);rc("rep");trap("c1");
+})();
+</script>
+</body></html>

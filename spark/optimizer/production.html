@@ -14,7 +14,7 @@
     <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
     <a href="../execution/index.html">3 · Execution</a>
     <a href="index.html" aria-current="page">4 · Optimizer &amp; AQE</a>
-    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+    <a href="../tuning/index.html">5 · Tuning &amp; debug</a>
   </nav>
 </div></header>
 
@@ -143,7 +143,7 @@
       <ul>
         <li>Confirm <code>spark.sql.adaptive.enabled=true</code> and look for <code>AdaptiveSparkPlan</code> in the plan.</li>
         <li>Tune the advisory partition size and skew thresholds for your data.</li>
-        <li>For skewed aggregations: salting or a two-step aggregation (<a href="../../spark-tuning.html#s-skew">Module 5 · Data skew</a>).</li>
+        <li>For skewed aggregations: salting or a two-step aggregation (<a href="../tuning/production.html#s-skew">Module 5 · Data skew</a>).</li>
       </ul>
       <div class="callout say"><div class="lbl">Say it in an interview</div>"AQE only acts at shuffle boundaries, and its skew handling covers sort-merge joins. If it isn't helping, I check it's enabled, check the skew thresholds, and handle aggregation skew myself with salting."</div>
     </div>
@@ -199,7 +199,7 @@ spark.sql.autoBroadcastJoinThreshold to -1</code></pre>
 
   <nav class="next">
     <a href="examples.html"><span>Back</span><b>Examples</b></a>
-    <a href="../../spark-tuning.html"><span>Next · Module 5</span><b>Performance tuning &amp; debugging</b></a>
+    <a href="../tuning/index.html"><span>Next · Module 5</span><b>Performance tuning &amp; debugging</b></a>
   </nav>
 </div></main>
 </body></html>

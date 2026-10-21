@@ -14,7 +14,7 @@
     <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
     <a href="../execution/index.html">3 · Execution</a>
     <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
-    <a href="../../spark-tuning.html">5 · Tuning &amp; debug</a>
+    <a href="../tuning/index.html">5 · Tuning &amp; debug</a>
   </nav>
 </div></header>
 
@@ -227,7 +227,7 @@ Cannot broadcast the table that is larger than 8GB.</code></pre>
         <li>Select fewer columns before the shuffle; aggregate before exploding.</li>
         <li>Fast local disks (NVMe) for shuffle-heavy clusters.</li>
       </ul>
-      <p class="small muted">The full walkthrough with example metrics is in Module 4: <a href="../../spark-tuning.html#s-spill">Disk spill scenario →</a></p>
+      <p class="small muted">The full walkthrough with example metrics is in Module 5: <a href="../tuning/production.html#s-spill">Disk spill scenario →</a></p>
       <div class="callout say"><div class="lbl">Say it in an interview</div>"Spill means a task's sort or aggregation didn't fit in its execution memory, so it used local disk. A little is fine. If it's large and even across tasks I add partitions or give each task more memory with fewer cores; if it's concentrated in a few tasks, it's skew."</div>
     </div>
   </section>
