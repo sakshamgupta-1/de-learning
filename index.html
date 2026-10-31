@@ -23,10 +23,10 @@
   <div class="wide">
     <p class="eyebrow">Interview prep library</p>
     <h1>Data engineering topics, one place</h1>
-    <p class="lede">97 data engineering interview topics across eight areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
+    <p class="lede">98 data engineering interview topics across eight areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
 
     <div class="summary">
-      <div><div class="big" id="pct">0<small>/97</small></div><div class="muted small">topics done</div></div>
+      <div><div class="big" id="pct">0<small>/98</small></div><div class="muted small">topics done</div></div>
       <div class="sectbars" id="sectbars"></div>
     </div>
 
@@ -190,23 +190,13 @@ const GROUPS=[
   ["Orchestration design: Lakeflow Jobs vs Airflow, dependencies and retries"],
   ["SLAs, SLOs and data freshness targets"],
   ["Incident response and runbooks for data pipelines"],
-  ["Cost monitoring and FinOps"],
+  ["FinOps: cost visibility, tagging, budgets and chargeback"],
+  ["Cost optimization: compute sizing, autoscaling, spot, serverless vs classic, Photon, storage lifecycle"],
   ["Databricks system tables for operational monitoring"]]}
 ];
-const KEY="de-learning-done-v2",OLD_KEY="de-learning-done-v1",MIGRATED="de-learning-migrated-v2";
-/* v1 -> v2: topics were regrouped. Ticks saved under old ids move to their new ids once. */
-const V1_TO_V2={"delta14":"delta12","delta15":"delta13","delta16":"delta14","delta17":"delta15","gov3":"iceberg5","pipe6":"pipe4","delta12":"gov3","delta13":"gov4","pipe7":"gov5","pipe8":"gov6","pipe9":"ops0","pipe4":"ops1","pipe5":"ops2"};
+const KEY="de-learning-done-v2";
 let done={};
-try{
-  const v2=localStorage.getItem(KEY);done=JSON.parse(v2||"{}")||{};
-  if(!localStorage.getItem(MIGRATED)){
-    const v1=JSON.parse(localStorage.getItem(OLD_KEY)||"{}")||{};
-    for(const k in v1){if(!v1[k])continue;const n=V1_TO_V2[k]||k;
-      if(v2&&/^spark\d+$/.test(n))continue;   /* module pages already carried Spark ticks into v2 */
-      done[n]=true}
-    localStorage.setItem(KEY,JSON.stringify(done));localStorage.setItem(MIGRATED,"1");
-  }
-}catch(e){done={}}
+try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){done={}}
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(done))}catch(e){}};
 let filter="all";
 const total=GROUPS.reduce((n,g)=>n+g.items.length,0);
