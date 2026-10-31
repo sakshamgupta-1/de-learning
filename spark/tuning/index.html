@@ -226,7 +226,7 @@
   $("dbgReset").addEventListener("click",()=>{i=0;render()});
   render();
 
-  const KEY="de-learning-done-v1",items=[[14,"Reading the Spark UI to debug a slow job"],[15,"Reduce shuffle operations"],[16,"Data skew and how it affects a Spark job"],[17,"Salting technique for skewed joins"],[18,"OOM errors: how to analyse and resolve"],[19,"Disk spill and how to manage it"],[20,"Small-file problem and how to fix it"],[21,"Repartition vs coalesce"],[22,"Spark executor selection and optimization"],[23,"Cache vs persist and storage levels"]];
+  const KEY="de-learning-done-v2",items=[[14,"Reading the Spark UI to debug a slow job"],[15,"Reduce shuffle operations"],[16,"Data skew and how it affects a Spark job"],[17,"Salting technique for skewed joins"],[18,"OOM errors: how to analyse and resolve"],[19,"Disk spill and how to manage it"],[20,"Small-file problem and how to fix it"],[21,"Repartition vs coalesce"],[22,"Spark executor selection and optimization"],[23,"Cache vs persist and storage levels"]];
   let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
   items.forEach(([n,t])=>{const id="spark"+n,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
     row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
