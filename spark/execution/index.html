@@ -164,7 +164,7 @@ if n &gt; 0:                                          <span class="muted"># plai
 
 <script>
 (function(){
-  const KEY="de-learning-done-v1",items=[[3,"Spark execution flow from spark-submit to job completion"],[4,"Lazy evaluation, lineage and RDD immutability"],[5,"Narrow vs wide transformations and stage boundaries"],[6,"How jobs, stages and tasks are created"],[7,"reduceByKey vs groupByKey"]];
+  const KEY="de-learning-done-v2",items=[[3,"Spark execution flow from spark-submit to job completion"],[4,"Lazy evaluation, lineage and RDD immutability"],[5,"Narrow vs wide transformations and stage boundaries"],[6,"How jobs, stages and tasks are created"],[7,"reduceByKey vs groupByKey"]];
   let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
   const box=document.getElementById("mine");
   items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");

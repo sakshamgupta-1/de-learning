@@ -180,7 +180,7 @@
 
 <script>
 (function(){
-  const KEY="de-learning-done-v1",items=[[8,"Catalyst optimizer and Tungsten"],[9,"Predicate pushdown in Spark SQL"],[10,"Partition pruning vs dynamic partition pruning"],[11,"Broadcast join vs sort-merge join vs shuffle hash join"],[12,"Adaptive Query Execution (AQE)"],[13,"Python UDF vs pandas UDF vs built-in functions"]];
+  const KEY="de-learning-done-v2",items=[[8,"Catalyst optimizer and Tungsten"],[9,"Predicate pushdown in Spark SQL"],[10,"Partition pruning vs dynamic partition pruning"],[11,"Broadcast join vs sort-merge join vs shuffle hash join"],[12,"Adaptive Query Execution (AQE)"],[13,"Python UDF vs pandas UDF vs built-in functions"]];
   let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
   const box=document.getElementById("mine");
   items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");

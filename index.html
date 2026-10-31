@@ -23,10 +23,10 @@
   <div class="wide">
     <p class="eyebrow">Interview prep library</p>
     <h1>Data engineering topics, one place</h1>
-    <p class="lede">79 data engineering interview topics across seven areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
+    <p class="lede">98 data engineering interview topics across eight areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
 
     <div class="summary">
-      <div><div class="big" id="pct">0<small>/79</small></div><div class="muted small">topics done</div></div>
+      <div><div class="big" id="pct">0<small>/98</small></div><div class="muted small">topics done</div></div>
       <div class="sectbars" id="sectbars"></div>
     </div>
 
@@ -126,7 +126,11 @@ const GROUPS=[
   ["Stateful operations and the RocksDB state store"],
   ["Stream-stream joins and watermarks"],
   ["Auto Loader: directory listing vs file notification"],
-  ["Kafka offsets, consumer groups and delivery semantics"]]},
+  ["Kafka offsets, consumer groups and delivery semantics"],
+  ["Kafka with Avro and a schema registry: schema compatibility modes"],
+  ["Stateless vs stateful streaming"],
+  ["Window types: tumbling, sliding and session windows"],
+  ["Replaying and reprocessing a stream (checkpoints, offsets, full refresh)"]]},
  {id:"delta",name:"Delta Lake & Databricks",items:[
   ["OPTIMIZE vs ZORDER"],
   ["How to handle deletes in Lakeflow"],
@@ -140,16 +144,17 @@ const GROUPS=[
   ["AUTO CDC / APPLY CHANGES for SCD Type 1 and 2"],
   ["Streaming tables vs materialized views in Lakeflow"],
   ["Lakeflow expectations (warn, drop, fail)"],
-  ["Unity Catalog object model and privileges"],
-  ["Row filters, column masks and ABAC in Unity Catalog"],
   ["Hive Metastore to Unity Catalog migration approach"],
-  ["Databricks Asset Bundles for CI/CD"]]},
- {id:"iceberg",name:"Iceberg & table formats",items:[
+  ["Databricks Asset Bundles for CI/CD"],
+  ["Dynamic partition overwrite vs Delta replaceWhere"],
+  ["AUTO CDC FROM SNAPSHOT (CDC from periodic full extracts)"]]},
+ {id:"iceberg",name:"Table & file formats",items:[
   ["Iceberg metadata layers (metadata.json, manifest list, manifests)"],
   ["Hidden partitioning and partition evolution"],
   ["Copy-on-write vs merge-on-read"],
   ["Iceberg maintenance (compaction, expire snapshots, orphan files)"],
-  ["Delta vs Iceberg vs Hudi"]]},
+  ["Delta vs Iceberg vs Hudi"],
+  ["Parquet vs Avro vs ORC"]]},
  {id:"model",name:"Data modelling & SQL",items:[
   ["Star vs snowflake schema"],
   ["SCD Type 1 vs 2 vs 3, and SCD2 with MERGE"],
@@ -157,24 +162,39 @@ const GROUPS=[
   ["Medallion architecture: what goes in each layer"],
   ["Window functions: dedup, top-N per group, running totals"],
   ["Gaps-and-islands and sessionization"]]},
- {id:"pipe",name:"Pipelines, orchestration & quality",items:[
+ {id:"pipe",name:"Pipeline design",items:[
   ["Idempotent pipelines and safe reruns"],
   ["Backfilling history without disrupting daily loads"],
   ["Handling schema drift from source systems"],
   ["CDC approaches: log-based vs query-based"],
-  ["Airflow sensors vs deferrable operators"],
-  ["Airflow catchup, backfill and retries"],
-  ["dbt incremental models and tests"],
-  ["Data quality checks: where and how to enforce"],
-  ["Data contracts with source teams"],
-  ["Pipeline monitoring and alerting"]]},
- {id:"gov",name:"Governance & cloud",items:[
+  ["dbt incremental models and tests"]]},
+ {id:"gov",name:"Data governance",items:[
   ["RBAC vs ABAC"],
   ["PII masking vs tokenization vs encryption"],
   ["Data lineage and impact analysis"],
-  ["Parquet vs Avro vs ORC"]]}
+  ["Unity Catalog object model and privileges"],
+  ["Row filters, column masks and ABAC in Unity Catalog"],
+  ["Data quality checks: where and how to enforce"],
+  ["Data contracts with source teams"],
+  ["Metadata management and the data catalog"],
+  ["Data classification and tagging (sensitivity labels driving access)"],
+  ["Data ownership and stewardship (data mesh, federated governance)"],
+  ["Retention and deletion for GDPR / right to erasure"],
+  ["Audit logging and access reviews"],
+  ["Data quality framework: dimensions, ownership and scorecards"]]},
+ {id:"ops",name:"Platform operations & observability",items:[
+  ["Pipeline monitoring and alerting"],
+  ["Airflow sensors vs deferrable operators"],
+  ["Airflow catchup, backfill and retries"],
+  ["Data platform observability (freshness, volume, schema and quality monitors)"],
+  ["Orchestration design: Lakeflow Jobs vs Airflow, dependencies and retries"],
+  ["SLAs, SLOs and data freshness targets"],
+  ["Incident response and runbooks for data pipelines"],
+  ["FinOps: cost visibility, tagging, budgets and chargeback"],
+  ["Cost optimization: compute sizing, autoscaling, spot, serverless vs classic, Photon, storage lifecycle"],
+  ["Databricks system tables for operational monitoring"]]}
 ];
-const KEY="de-learning-done-v1";
+const KEY="de-learning-done-v2";
 let done={};
 try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){done={}}
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(done))}catch(e){}};

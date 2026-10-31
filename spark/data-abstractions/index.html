@@ -199,7 +199,7 @@
 
 <script>
 (function(){
-  const KEY="de-learning-done-v1",items=[[25,"RDD vs DataFrame vs Dataset vs pandas DataFrame"],[26,"toPandas, Arrow and the pandas API on Spark"]];
+  const KEY="de-learning-done-v2",items=[[25,"RDD vs DataFrame vs Dataset vs pandas DataFrame"],[26,"toPandas, Arrow and the pandas API on Spark"]];
   let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
   const box=document.getElementById("mine");
   items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
