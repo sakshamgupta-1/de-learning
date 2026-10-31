@@ -4,7 +4,7 @@ An interactive study hub for **data engineering interview preparation**, aimed a
 
 It's a small static website: plain HTML, CSS and JavaScript, with no build step and no backend. It has two parts:
 
-- **Topic tracker** (`index.html`): 79 interview topics in seven areas. Readers tick topics off as they learn them, and progress is saved in their own browser.
+- **Topic tracker** (`index.html`): 84 interview topics in seven areas. Readers tick topics off as they learn them, and progress is saved in their own browser.
 - **Learning paths**: interactive pages that teach one area in depth, with diagrams, worked examples, failure scenarios, debug flows and ready-to-use interview answers.
 
 ## Why this repo exists
