@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spark Tuning and Debugging</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="index.html" aria-current="page">5 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">Tuning &amp; debugging</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+
+  <p class="eyebrow">Spark Core · Module 5 of 5 · Overview</p>
+  <h1>Finding and fixing slow Spark jobs</h1>
+  <p class="lede">Interviewers rarely ask "what is skew?" on its own. They describe a slow or failing job and watch how you investigate. Learn the debug flow, the levers in priority order, and the defaults behind them. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#approach">Approach</a><a href="#debug">Debug flow</a><a href="#ui">Spark UI signals</a><a href="#levers">Levers</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="approach">
+    <h2>Evidence first, settings last</h2>
+    <p>Tuning is finding the <b>one stage</b> that dominates the runtime, working out <b>why</b> from its metrics, and applying the smallest fix for that cause. Changing memory or partition settings before you know the cause usually moves the problem somewhere else.</p>
+    <p>Almost every slow or failing job comes down to five causes: <b>out of memory</b>, <b>skew</b>, <b>spill</b>, <b>too many small files or tasks</b>, and <b>too much shuffle</b>. The Spark UI tells you which one, and each has a standard set of fixes.</p>
+  </section>
+
+  <section id="debug">
+    <h2>The debug flow</h2>
+    <p>Start in the Spark UI: <b>Jobs</b> → the slowest job → <b>Stages</b> → the slowest stage → its <b>summary metrics</b> (min, 25th percentile, median, 75th percentile and max per task). Answer each question below for that stage; a "yes" leads to the scenario to read. You can also click any outcome directly.</p>
+  <div class="calc" style="margin-bottom:0">
+    <div aria-live="polite" id="dbgNote"></div>
+    <div class="ctrl">
+      <button class="btn" id="dbgYes">Yes</button>
+      <button class="btn ghost" id="dbgNo">No</button>
+      <button class="btn ghost" id="dbgReset">Start again</button>
+    </div>
+  </div>
+
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 820 560" role="img" aria-labelledby="dbgT">
+  <title id="dbgT">Decision flow for diagnosing a slow or failing Spark job</title>
+  <defs>
+    <marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <rect class="bx2" x="40" y="14" width="440" height="46" rx="23"/><text class="tb" x="260" y="42" text-anchor="middle">Job is slow, or fails</text>
+  <rect class="bx" id="q0" x="40" y="94" width="440" height="50" rx="8"/><text class="t" x="260" y="124" text-anchor="middle">Did tasks fail with OutOfMemory or "container killed"?</text>
+  <rect class="bx" id="q1" x="40" y="174" width="440" height="50" rx="8"/><text class="t" x="260" y="204" text-anchor="middle">In the slowest stage, is max task time ≫ median?</text>
+  <rect class="bx" id="q2" x="40" y="254" width="440" height="50" rx="8"/><text class="t" x="260" y="284" text-anchor="middle">Does the stage show Spill (memory / disk)?</text>
+  <rect class="bx" id="q3" x="40" y="334" width="440" height="50" rx="8"/><text class="t" x="260" y="364" text-anchor="middle">Thousands of very short tasks, or thousands of files?</text>
+  <rect class="bx" id="q4" x="40" y="414" width="440" height="50" rx="8"/><text class="t" x="260" y="444" text-anchor="middle">Large shuffle read/write, or a big table in SortMergeJoin?</text>
+  <a href="deep-dive.html#gc"><rect class="bx2" id="q5" x="40" y="494" width="440" height="50" rx="25"/><text class="t" x="260" y="524" text-anchor="middle">Check GC time, Python UDFs, source I/O, cluster size →</text></a>
+  <g>
+    <line class="ln" x1="260" y1="60" x2="260" y2="90" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="144" x2="260" y2="170" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="224" x2="260" y2="250" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="304" x2="260" y2="330" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="384" x2="260" y2="410" marker-end="url(#f1)"/>
+    <line class="ln" x1="260" y1="464" x2="260" y2="490" marker-end="url(#f1)"/>
+    <text class="ts" x="270" y="162">no</text><text class="ts" x="270" y="242">no</text><text class="ts" x="270" y="322">no</text><text class="ts" x="270" y="402">no</text><text class="ts" x="270" y="482">no</text>
+  </g>
+  <g>
+    <line class="lna" x1="480" y1="119" x2="556" y2="119" marker-end="url(#f2)"/><text class="ts" x="500" y="111">yes</text>
+    <line class="lna" x1="480" y1="199" x2="556" y2="199" marker-end="url(#f2)"/><text class="ts" x="500" y="191">yes</text>
+    <line class="lna" x1="480" y1="279" x2="556" y2="279" marker-end="url(#f2)"/><text class="ts" x="500" y="271">yes</text>
+    <line class="lna" x1="480" y1="359" x2="556" y2="359" marker-end="url(#f2)"/><text class="ts" x="500" y="351">yes</text>
+    <line class="lna" x1="480" y1="439" x2="556" y2="439" marker-end="url(#f2)"/><text class="ts" x="500" y="431">yes</text>
+  </g>
+  <a href="production.html#s-oom"><rect class="bxr" id="o0" x="560" y="94" width="240" height="50" rx="8"/><text class="tb" x="680" y="124" text-anchor="middle">OOM: executor or driver →</text></a>
+  <a href="production.html#s-skew"><rect class="bxa" id="o1" x="560" y="174" width="240" height="50" rx="8"/><text class="tb" x="680" y="204" text-anchor="middle">Data skew →</text></a>
+  <a href="production.html#s-spill"><rect class="bxa" id="o2" x="560" y="254" width="240" height="50" rx="8"/><text class="tb" x="680" y="284" text-anchor="middle">Disk spill →</text></a>
+  <a href="production.html#s-small"><rect class="bxb" id="o3" x="560" y="334" width="240" height="50" rx="8"/><text class="tb" x="680" y="364" text-anchor="middle">Small files / too many tasks →</text></a>
+  <a href="production.html#s-shuffle"><rect class="bxb" id="o4" x="560" y="414" width="240" height="50" rx="8"/><text class="tb" x="680" y="444" text-anchor="middle">Heavy shuffle / slow join →</text></a>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <section id="ui">
+    <h2>Where each signal lives in the Spark UI</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Signal</th><th>Where to look</th></tr></thead>
+      <tbody>
+        <tr><td>Which job or stage is slow</td><td><b>Jobs</b> and <b>Stages</b> tabs, sorted by duration</td></tr>
+        <tr><td>Skew</td><td>Stage → <b>Summary Metrics</b>: Duration and Shuffle Read Size, max vs median; one long bar in the Event Timeline</td></tr>
+        <tr><td>Spill</td><td>Stage → <b>Spill (Memory)</b> and <b>Spill (Disk)</b> columns</td></tr>
+        <tr><td>GC pressure</td><td>Task table → <b>GC Time</b>; Executors tab highlights GC over about 10% of task time</td></tr>
+        <tr><td>Failures</td><td>Stage → failed tasks → error column; <b>Executors</b> tab → dead executors and their logs</td></tr>
+        <tr><td>Final plan and rows per operator</td><td><b>SQL / DataFrame</b> tab: the plan after AQE, with row counts and sizes per node</td></tr>
+        <tr><td>What's cached</td><td><b>Storage</b> tab: cached fraction and size per DataFrame</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="levers">
+    <h2>The levers, in priority order</h2>
+    <p>Once you know the cause, reach for the cheapest lever that addresses it. Higher in the list usually means a bigger gain for less risk.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Lever</th><th>Fixes</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td><b>Read less</b></td><td>Slow scans, heavy shuffle</td><td>Early filters and projections, partition pruning, compaction</td></tr>
+        <tr><td><b>Shuffle less</b></td><td>Heavy shuffle, slow joins</td><td>Broadcast small sides, pre-aggregate, remove accidental shuffles</td></tr>
+        <tr><td><b>Balance the work</b></td><td>Skew, stragglers</td><td>AQE skew join, handle <code>NULL</code> keys, salting</td></tr>
+        <tr><td><b>Right-size partitions</b></td><td>Spill, OOM, tiny tasks</td><td>About 100–200 MB per shuffle partition; AQE coalescing</td></tr>
+        <tr><td><b>Memory per task</b></td><td>OOM, spill</td><td>Fewer cores per executor, more memory or overhead</td></tr>
+        <tr><td><b>Cache reused results</b></td><td>Repeated recomputation</td><td><code>persist()</code> on classic compute; an intermediate table elsewhere</td></tr>
+        <tr><td><b>Cluster size and shape</b></td><td>Everything is evenly slow</td><td>More or larger workers, autoscaling, instance type</td></tr>
+      </tbody></table></div>
+    <p class="small muted">The details behind each lever: <a href="deep-dive.html#shuffle">reducing shuffle</a>, <a href="deep-dive.html#repartition">repartition vs coalesce</a>, <a href="deep-dive.html#cache">cache vs persist</a>, <a href="examples.html#partitions">partition sizing</a> and <a href="examples.html#executors">executor sizing</a>.</p>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Setting or fact</th><th class="num">Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>spark.sql.shuffle.partitions</code></td><td class="num">200</td></tr>
+        <tr><td>Target shuffle partition size (rule of thumb)</td><td class="num">100–200 MB</td></tr>
+        <tr><td><code>spark.sql.adaptive.advisoryPartitionSizeInBytes</code></td><td class="num">64 MB</td></tr>
+        <tr><td><code>spark.sql.files.maxPartitionBytes</code> (read split size)</td><td class="num">128 MB</td></tr>
+        <tr><td><code>spark.sql.files.openCostInBytes</code></td><td class="num">4 MB</td></tr>
+        <tr><td>AQE skewed partition: over 5 × median <b>and</b> over</td><td class="num">256 MB</td></tr>
+        <tr><td><code>spark.sql.autoBroadcastJoinThreshold</code></td><td class="num">10 MB</td></tr>
+        <tr><td><code>spark.executor.memoryOverhead</code></td><td class="num">10%, min 384 MB</td></tr>
+        <tr><td><code>spark.memory.fraction</code> / <code>spark.memory.storageFraction</code></td><td class="num">0.6 / 0.5</td></tr>
+        <tr><td><code>spark.driver.maxResultSize</code></td><td class="num">1 GB</td></tr>
+        <tr><td>Cores per executor (classic rule of thumb)</td><td class="num">about 5</td></tr>
+        <tr><td><code>DataFrame.cache()</code> storage level</td><td class="num">memory and disk</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">How you debug</div>"I start in the Spark UI: find the slowest job and stage, then read that stage's summary metrics. Max versus median task time tells me if it's skew; spill columns tell me partitions are too big for the memory per task; failed tasks and their errors tell me if it's an OOM; task and file counts reveal small files; and the SQL tab shows the join strategy and how much is shuffled. Then I fix that specific cause."</div>
+    <div class="callout say"><div class="lbl">What you change first</div>"I fix the data flow before the cluster: read less, shuffle less, balance skew, then right-size partitions. Executor memory and cluster size come last, because they cost money and often just hide the cause."</div>
+    <div class="callout say"><div class="lbl">Skew in one breath</div>"One key holds most of the rows, so one task does most of the work. I confirm it from max versus median shuffle read, check for NULL keys, then use AQE skew joins, a broadcast, or salting with a two-step aggregation."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>"Our nightly job went from 1 hour to 4 hours. Nothing changed in the code." Where do you start?</summary><div>Compare with a previous good run and find which stage grew. Then check input volume (did a filter stop pruning?), task-time distribution (a new hot key), spill (data outgrew memory per task), file counts, and whether a dimension crossed the broadcast threshold. Full walkthrough: <a href="production.html#regression">production issues</a>.</div></details>
+      <details><summary>199 tasks finish in 30 s, one takes 45 min. Name three fixes.</summary><div>AQE skew-join handling (for a sort-merge join), broadcast the smaller side, or salt the hot key. First check whether the hot key is <code>NULL</code> or a default value.</div></details>
+      <details><summary>When would you increase <code>spark.sql.shuffle.partitions</code>, and when decrease it?</summary><div>Increase when post-shuffle partitions are large (spill, OOM, long tasks); decrease when they're tiny (many short tasks, small output files). With AQE, set it high and let coalescing reduce it.</div></details>
+      <details><summary>Heap is fine, but containers are killed with exit code 137. What do you change?</summary><div>The process exceeded its container limit outside the heap, often Python workers or native memory. Raise <code>spark.executor.memoryOverhead</code>, reduce Python UDF memory, or prefer built-in functions.</div></details>
+      <details><summary><code>coalesce</code> or <code>repartition</code> to write fewer files after a heavy aggregation?</summary><div>Usually <code>repartition</code>: <code>coalesce</code> shrinks the parallelism of the whole stage it's in, so the aggregation itself runs on few tasks. <a href="deep-dive.html#coalesce-trap">See the trap</a>.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html">
+        <span class="n">Deep dive</span><b>The tuning levers, in depth</b>
+        <p>The shuffle checklist and accidental shuffles, repartition vs coalesce side by side, the coalesce(1) trap, storage levels, GC and Python overhead, and Databricks specifics.</p>
+      </a>
+      <a class="mod" href="examples.html">
+        <span class="n">Examples</span><b>Size it, then fix the skew</b>
+        <p>Partition and executor sizing calculators, and a side-by-side run of a skewed stage before and after salting.</p>
+      </a>
+      <a class="mod" href="production.html">
+        <span class="n">Production issues</span><b>Six ways Spark jobs fail or crawl</b>
+        <p>Skew, executor and driver OOM, spill, small files and heavy shuffle, each with metrics, confirmation steps, fixes and prevention, plus the "it got slower" walkthrough.</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../optimizer/index.html"><span>Previous · Module 4</span><b>Catalyst, joins &amp; AQE</b></a>
+    <a href="../../index.html"><span>Done with Spark Core</span><b>Back to the hub</b></a>
+  </nav>
+</div></main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const Q=[
+    {q:"Did tasks fail with OutOfMemory or \"container killed\"?",look:"Stage → failed tasks → error column, and the Executors tab for dead executors. Look for <code>OutOfMemoryError</code>, \"container killed\" or exit code 137.",
+     out:"Out of memory. Read the error to tell executor heap, container overhead and driver apart.",href:"production.html#s-oom"},
+    {q:"In the slowest stage, is max task time much longer than the median?",look:"Stage → Summary Metrics: compare max with median for Duration and Shuffle Read Size. One long bar in the Event Timeline.",
+     out:"Data skew: one key holds most of the rows.",href:"production.html#s-skew"},
+    {q:"Does the stage show spill (memory or disk)?",look:"Stage → the Spill (Memory) and Spill (Disk) columns. Divide the stage's shuffle read by its task count.",
+     out:"Disk spill: partitions are too big for the memory per task.",href:"production.html#s-spill"},
+    {q:"Thousands of very short tasks, or thousands of files?",look:"Task count and median task duration for the scan stage; <code>DESCRIBE DETAIL</code> for <code>numFiles</code> and size.",
+     out:"Small files or too many tiny tasks.",href:"production.html#s-small"},
+    {q:"Large shuffle read or write, or a big table in a SortMergeJoin?",look:"SQL tab: count Exchange nodes and check the join operators; Stages tab: Shuffle Write per stage.",
+     out:"Heavy shuffle or a slow join.",href:"production.html#s-shuffle"}
+  ];
+  let i=0,hit=null;
+  function mark(id){if(hit)$(hit).classList.remove("hit");hit=id;if(id)$(id).classList.add("hit")}
+  function render(answer){
+    if(answer==="yes"){mark("o"+i);
+      $("dbgNote").innerHTML=`<p style="margin:0"><b>Likely cause:</b> ${Q[i].out} <a href="${Q[i].href}">Open the scenario →</a></p>`;
+      $("dbgYes").disabled=$("dbgNo").disabled=true;return}
+    if(i>=Q.length){mark("q5");
+      $("dbgNote").innerHTML=`<p style="margin:0"><b>None of the five.</b> Check GC time, Python UDFs, slow source reads and whether the cluster is simply too small for the work. <a href="deep-dive.html#gc">GC and Python overhead →</a></p>`;
+      $("dbgYes").disabled=$("dbgNo").disabled=true;return}
+    mark("q"+i);
+    $("dbgNote").innerHTML=`<p class="small muted" style="margin:0 0 .3rem">Question ${i+1} of ${Q.length}</p><p style="margin:0 0 .3rem"><b>${Q[i].q}</b></p><p style="margin:0"><b>Where to look:</b> ${Q[i].look}</p>`;
+    $("dbgYes").disabled=$("dbgNo").disabled=false;
+  }
+  $("dbgYes").addEventListener("click",()=>render("yes"));
+  $("dbgNo").addEventListener("click",()=>{i++;render()});
+  $("dbgReset").addEventListener("click",()=>{i=0;render()});
+  render();
+
+  const KEY="de-learning-done-v1",items=[[14,"Reading the Spark UI to debug a slow job"],[15,"Reduce shuffle operations"],[16,"Data skew and how it affects a Spark job"],[17,"Salting technique for skewed joins"],[18,"OOM errors: how to analyse and resolve"],[19,"Disk spill and how to manage it"],[20,"Small-file problem and how to fix it"],[21,"Repartition vs coalesce"],[22,"Spark executor selection and optimization"],[23,"Cache vs persist and storage levels"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  items.forEach(([n,t])=>{const id="spark"+n,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    $("mine").appendChild(row)});
+})();
+</script>
+</body></html>

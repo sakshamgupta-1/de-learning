@@ -15,7 +15,7 @@
     <a href="spark/data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
     <a href="spark/execution/index.html">3 · Execution</a>
     <a href="spark/optimizer/index.html">4 · Optimizer &amp; AQE</a>
-    <a href="spark-tuning.html">5 · Tuning &amp; debug</a>
+    <a href="spark/tuning/index.html">5 · Tuning &amp; debug</a>
   </nav>
 </div></header>
 
@@ -60,9 +60,9 @@
           <p>Optimizer phases, pushdown and pruning, reading explain(), join strategies, AQE, UDF cost.</p>
           <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
-        <a class="mod" href="spark-tuning.html" data-mod="tune">
+        <a class="mod" href="spark/tuning/index.html" data-mod="tune">
           <span class="n">Module 5</span><b>Performance tuning &amp; debugging</b>
-          <p>Debug flow, six failure scenarios, shuffle reduction, partition and executor sizing.</p>
+          <p>Guided debug flow, six failure scenarios, shuffle reduction, salting, partition and executor sizing.</p>
           <div class="ft"><span>≈75 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
       </div>
@@ -85,7 +85,7 @@
 </main>
 
 <script>
-const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark-tuning.html";
+const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark/tuning/index.html",TD="spark/tuning/deep-dive.html",TE="spark/tuning/examples.html",TP="spark/tuning/production.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
@@ -103,15 +103,15 @@ const GROUPS=[
   ["Adaptive Query Execution (AQE) and what it optimizes",O+"#aqe","opt"],
   ["Python UDF vs pandas UDF vs built-in functions",O+"#udf","opt"],
   ["Reading the Spark UI to debug a slow job",T+"#debug","tune"],
-  ["Reduce shuffle operations",T+"#shuffle","tune"],
-  ["Data skew and how it affects a Spark job",T+"#s-skew","tune"],
-  ["Salting technique for skewed joins",T+"#s-skew","tune"],
-  ["OOM errors: how to analyse and resolve",T+"#s-oom","tune"],
-  ["Disk spill and how to manage it",T+"#s-spill","tune"],
-  ["Small-file problem and how to fix it",T+"#s-small","tune"],
-  ["Repartition vs coalesce",T+"#repartition","tune"],
-  ["Spark executor selection and optimization",T+"#executors","tune"],
-  ["Cache vs persist and storage levels",T+"#cache","tune"],
+  ["Reduce shuffle operations",TD+"#shuffle","tune"],
+  ["Data skew and how it affects a Spark job",TP+"#s-skew","tune"],
+  ["Salting technique for skewed joins",TE+"#salting","tune"],
+  ["OOM errors: how to analyse and resolve",TP+"#s-oom","tune"],
+  ["Disk spill and how to manage it",TP+"#s-spill","tune"],
+  ["Small-file problem and how to fix it",TP+"#s-small","tune"],
+  ["Repartition vs coalesce",TD+"#repartition","tune"],
+  ["Spark executor selection and optimization",TE+"#executors","tune"],
+  ["Cache vs persist and storage levels",TD+"#cache","tune"],
   ["Hadoop & MapReduce basics, and what Spark improved",M+"#spark","mr"],
   ["RDD vs DataFrame vs Dataset vs pandas DataFrame",R+"#compare","abs"],
   ["toPandas, Arrow and the pandas API on Spark",P+"#topandas","abs"],
