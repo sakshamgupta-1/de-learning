@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Operating Streams: Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html" aria-current="page">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Operating streams</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 4 of 4 · Examples</p>
+  <h1>Measure, watch, replay</h1>
+  <p class="lede">Work out whether a stream can keep up, read a progress report field by field, ship metrics with a listener, and run each replay path in code.</p>
+  <div class="toc">
+    <a href="#backlog">Can it keep up?</a><a href="#progress">A progress report</a><a href="#listener">Metrics listener</a><a href="#replay-code">Replay recipes</a>
+  </div>
+
+  <section id="backlog">
+    <h2>Can it keep up?</h2>
+    <p>Enter your stream's numbers. The calculator works out each batch's size and duration, whether the stream keeps up, and how long a backlog (say after an outage) takes to clear.</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="bIn">Input rate (rows/s)<input id="bIn" type="number" min="0" value="20000"></label>
+        <label for="bCore">Rows/s one core processes<input id="bCore" type="number" min="1" value="2500"></label>
+        <label for="bCores">Cores used per batch<input id="bCores" type="number" min="1" value="16"></label>
+        <label for="bTrig">Trigger interval (s)<input id="bTrig" type="number" min="1" value="60"></label>
+        <label for="bOver">Fixed overhead per batch (s)<input id="bOver" type="number" min="0" value="8"></label>
+        <label for="bOut">Outage to catch up from (min)<input id="bOut" type="number" min="0" value="30"></label>
+      </div>
+      <div class="out" id="bRes" aria-live="polite"></div>
+      <p class="small muted" style="margin-bottom:0">A simplified model: processing scales linearly with cores, and overhead (planning, discovery, commits) is fixed per batch. Real rates vary with data, skew and state; measure <code>processedRowsPerSecond</code> to calibrate "rows/s one core processes".</p>
+    </div>
+  </section>
+
+  <section id="progress">
+    <h2>A progress report, annotated</h2>
+<pre><code>{
+  "id": "8c1f…",  "runId": "2a9e…",  "batchId": 1532,          <span class="muted"># id stable across restarts, runId per start</span>
+  "numInputRows": 1180000,
+  "inputRowsPerSecond": 19650.0,                               <span class="muted"># arriving</span>
+  "processedRowsPerSecond": 24100.0,                           <span class="muted"># processed: above input = keeping up</span>
+  "durationMs": {
+    "latestOffset": 410, "queryPlanning": 220,                 <span class="muted"># before tasks: discovery and planning</span>
+    "addBatch": 46300,                                         <span class="muted"># the Spark job and the sink write</span>
+    "walCommit": 95, "commitOffsets": 120,
+    "triggerExecution": 48960                                  <span class="muted"># the whole batch: compare with the trigger interval</span>
+  },
+  "eventTime": { "max": "2026-10-31T12:31:58Z", "watermark": "2026-10-31T12:21:58Z" },
+  "stateOperators": [{
+    "operatorName": "stateStoreSave",
+    "numRowsTotal": 4210000, "numRowsUpdated": 380000, "numRowsRemoved": 352000,
+    "commitTimeMs": 2100, "memoryUsedBytes": 1873000000,
+    "numRowsDroppedByWatermark": 12                            <span class="muted"># late rows discarded</span>
+  }],
+  "sources": [{
+    "description": "KafkaV2[Subscribe[orders]]",
+    "metrics": { "avgOffsetsBehindLatest": "3400.0", "maxOffsetsBehindLatest": "9100" }   <span class="muted"># lag</span>
+  }],
+  "sink": { "description": "DeltaSink[gold.orders_10m]", "numOutputRows": 6100 }
+}</code></pre>
+    <p class="small muted">Values are an example. Field names follow Spark's <code>StreamingQueryProgress</code>; some sources add their own metrics.</p>
+  </section>
+
+  <section id="listener">
+    <h2>A metrics listener</h2>
+<pre><code>from pyspark.sql.streaming import StreamingQueryListener
+import json
+
+class MetricsListener(StreamingQueryListener):
+    def onQueryStarted(self, event):
+        emit("stream.started", {"name": event.name, "id": str(event.id)})
+
+    def onQueryProgress(self, event):
+        p = json.loads(event.progress.json)
+        emit("stream.progress", {
+            "name": p["name"], "batch": p["batchId"],
+            "input_rps": p.get("inputRowsPerSecond", 0),
+            "processed_rps": p.get("processedRowsPerSecond", 0),
+            "batch_ms": p["durationMs"].get("triggerExecution", 0),
+            "state_rows": sum(s["numRowsTotal"] for s in p.get("stateOperators", [])),
+            "dropped_late": sum(s.get("numRowsDroppedByWatermark", 0) for s in p.get("stateOperators", [])),
+        })
+
+    def onQueryIdle(self, event):        <span class="muted"># Spark 3.5+: no new data</span>
+        pass
+
+    def onQueryTerminated(self, event):
+        emit("stream.terminated", {"id": str(event.id), "error": event.exception})
+
+spark.streams.addListener(MetricsListener())</code></pre>
+    <p><code>emit</code> stands for your metrics client (a Delta table, Prometheus push gateway, CloudWatch, Datadog). Keep it fast and non-blocking: the listener runs on the driver for every batch of every query. Name queries with <code>.queryName("orders_gold")</code> so metrics are readable.</p>
+  </section>
+
+  <section id="replay-code">
+    <h2>Replay recipes</h2>
+    <h3>Kafka: new checkpoint from explicit offsets</h3>
+<pre><code>start = json.dumps({"orders": {"0": 15000, "1": 15000, "2": 15000}})   <span class="muted"># a little before the last good point</span>
+(spark.readStream.format("kafka").option("subscribe", "orders")
+      .option("startingOffsets", start) …
+      .writeStream.option("checkpointLocation", "/chk/orders_v2")          <span class="muted"># new checkpoint</span>
+      .foreachBatch(idempotent_merge).start())</code></pre>
+    <h3>Delta source: new checkpoint from a version</h3>
+<pre><code>spark.readStream.option("startingVersion", 4120).table("bronze.orders")</code></pre>
+    <h3>Auto Loader: new checkpoint, only recent files</h3>
+<pre><code>(spark.readStream.format("cloudFiles")
+      .option("cloudFiles.format", "json")
+      .option("modifiedAfter", "2026-10-30T00:00:00Z")   <span class="muted"># skip files before the cut-over</span>
+      .load("s3://landing/orders/"))</code></pre>
+    <h3>Recompute a range in batch, stream untouched</h3>
+<pre><code>fixed = transform(spark.read.table("bronze.orders")
+                       .where("order_date BETWEEN '2026-10-01' AND '2026-10-07'"))
+(fixed.write.format("delta").mode("overwrite")
+      .option("replaceWhere", "order_date BETWEEN '2026-10-01' AND '2026-10-07'")
+      .saveAsTable("silver.orders"))</code></pre>
+    <p>Run the range recompute while the stream keeps writing newer dates. If the stream could write into the same range at the same time (late data), use a MERGE keyed on the business key instead of <code>replaceWhere</code>.</p>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const fm=s=>s<90?Math.round(s)+" s":s<5400?(s/60).toFixed(1)+" min":(s/3600).toFixed(1)+" h";
+const fn=n=>n.toLocaleString("en-US",{maximumFractionDigits:0});
+function calc(){const v=id=>Math.max(0,+$(id).value||0);
+  const inR=v("bIn"),cap=Math.max(1,v("bCore"))*Math.max(1,v("bCores")),trig=Math.max(1,v("bTrig")),ov=v("bOver"),out=v("bOut")*60;
+  const rows=inR*trig,dur=ov+rows/cap;
+  /* sustainable throughput when batches run back to back with as much data as needed: cap*(1-ov/T) at interval T */
+  const sustain=cap*Math.max(0,1-ov/Math.max(trig,dur));
+  const keeps=dur<=trig;
+  const backlog=inR*out,spare=sustain-inR,drain=spare>0?backlog/spare:Infinity;
+  $("bRes").innerHTML=[[fn(rows),"rows per batch at steady state"],[fm(dur),"batch duration"],[keeps?"Yes":"No",keeps?"keeps up within the trigger interval":"falls behind: batches overrun the interval"],
+    [Math.round(dur/trig*100)+"%","of the interval used"],[fn(sustain)+" rows/s","max sustainable throughput"],[drain===Infinity?"never":fm(drain),"to clear a "+v("bOut")+" min backlog"]]
+    .map(([x,l],i)=>`<div><b${i===2?` style="color:var(${keeps?"--ok":"--bad"})"`:""}>${x}</b><span>${l}</span></div>`).join("")}
+["bIn","bCore","bCores","bTrig","bOver","bOut"].forEach(id=>$(id).addEventListener("input",calc));calc();
+})();
+</script>
+</body></html>

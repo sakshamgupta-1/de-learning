@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Structured Streaming Fundamentals: Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html" aria-current="page">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Streaming fundamentals</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 1 of 4 · Deep dive</p>
+  <h1>Inside the streaming engine</h1>
+  <p class="lede">What the checkpoint actually contains, the contracts that make exactly-once work, how triggers behave at the edges, and how a streaming query shows up in the Spark UI.</p>
+  <div class="toc">
+    <a href="#checkpoint">Checkpoint layout</a><a href="#contracts">Source and sink contracts</a><a href="#trigger-edges">Trigger edge cases</a><a href="#continuous">Continuous processing</a><a href="#ui">In the Spark UI</a><a href="#dstreams">vs DStreams</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="checkpoint">
+    <h2>What's in a checkpoint</h2>
+<pre class="tree"><code>/chk/orders_bronze/
+├─ metadata              the query id (a UUID that survives restarts)
+├─ offsets/              write-ahead log: one file per batch, written BEFORE the batch runs
+│  ├─ 41
+│  └─ 42                 batch 42's end offsets per source, plus key confs (shuffle partitions, …)
+├─ commits/              one file per batch, written AFTER the sink succeeds
+│  └─ 41                 → batch 42 is "planned but not committed"
+├─ sources/0/            source-specific progress (e.g. the file source's list of files seen;
+│                        Auto Loader keeps a RocksDB of discovered files here)
+└─ state/0/              stateful operator 0, one folder per state partition
+   ├─ 0/  1.delta 2.delta … 10.snapshot      (default provider)
+   └─ …                                        (RocksDB provider: SST and changelog files)</code></pre>
+    <p>An offsets file for a Kafka source looks like this (trimmed). The first line is the format version; the next carries the batch watermark, timestamp and the configurations that must stay fixed for this checkpoint; then one line per source:</p>
+<pre><code>v1
+{"batchWatermarkMs":0,"batchTimestampMs":1761900000000,"conf":{"spark.sql.shuffle.partitions":"200", …}}
+{"orders":{"0":15200,"1":15188,"2":15231}}</code></pre>
+    <ul>
+      <li><b>Why the confs are stored:</b> state is partitioned by them. On restart Spark restores <code>spark.sql.shuffle.partitions</code> from the checkpoint, whatever the session says.</li>
+      <li><b>Retention:</b> Spark keeps the last <code>spark.sql.streaming.minBatchesToRetain</code> (100) batches of logs and state versions, and deletes older ones in the background.</li>
+      <li><b>Where it lives:</b> durable, consistent storage (cloud object storage or HDFS), never local disk. On Databricks with Unity Catalog, a volume or external location.</li>
+    </ul>
+  </section>
+
+  <section id="contracts">
+    <h2>The source and sink contracts</h2>
+    <div class="ba">
+      <div><h4>Source</h4>
+        <ul style="margin:0">
+          <li>Reports its latest available offset.</li>
+          <li>Returns the data between any two offsets, <b>the same data every time</b> (replayable).</li>
+          <li>Is told when offsets are committed, so it can discard old data if it wants.</li>
+        </ul>
+        <p class="small muted" style="margin:.5rem 0 0">Kafka, files, Delta, Auto Loader: replayable. The <code>socket</code> and <code>rate</code> test sources aren't production sources.</p></div>
+      <div><h4>Sink</h4>
+        <ul style="margin:0">
+          <li>Receives each batch with its <b>batch id</b>.</li>
+          <li>Must make writing the same batch id twice have no effect (idempotent).</li>
+        </ul>
+        <p class="small muted" style="margin:.5rem 0 0">Delta and file sinks: idempotent (batch ids recorded in the Delta log or <code>_spark_metadata</code>). Kafka sink, <code>foreach</code>, <code>foreachBatch</code>: at-least-once unless you make them idempotent.</p></div>
+    </div>
+    <h3>Making <code>foreachBatch</code> idempotent</h3>
+    <ul>
+      <li><b>Delta writes:</b> pass <code>txnAppId</code> (a stable id for this query) and <code>txnVersion</code> (the batch id). Delta skips a write whose app id and version it has already committed.</li>
+      <li><b>MERGE:</b> naturally idempotent for upserts if the batch is deduplicated by key first: re-running it updates rows to the same values.</li>
+      <li><b>External systems:</b> write with the batch id and skip batch ids already applied, or use upserts keyed on a natural key.</li>
+    </ul>
+    <p>Examples in code: <a href="examples.html#idempotent">idempotent foreachBatch</a>.</p>
+  </section>
+
+  <section id="trigger-edges">
+    <h2>Trigger edge cases</h2>
+    <ul>
+      <li><b>Overrunning batches:</b> with <code>processingTime="1 minute"</code>, a batch that takes 90 seconds is followed immediately by the next. Batches never overlap, so a query that's always overrunning is falling behind (<a href="../operations/index.html#bottlenecks">Module 4</a>).</li>
+      <li><b>Empty batches:</b> if no new data arrived, no batch runs, except that a stateful query may run a <b>no-data batch</b> to advance the watermark and emit or evict state (<code>spark.sql.streaming.noDataMicroBatches.enabled</code>, true by default).</li>
+      <li><b><code>availableNow</code> and rate limits:</b> it fixes the end position at start-up, then works through it in batches sized by <code>maxFilesPerTrigger</code> / <code>maxOffsetsPerTrigger</code>. Data arriving during the run waits for the next run.</li>
+      <li><b>Switching triggers</b> on the same checkpoint is fine: the checkpoint records data positions, not the trigger.</li>
+      <li><b>Databricks serverless</b> supports only <code>availableNow</code> (and the deprecated <code>once</code>) in notebooks and jobs; Lakeflow pipelines manage their own triggers.</li>
+    </ul>
+  </section>
+
+  <section id="continuous">
+    <h2>Continuous processing</h2>
+    <p><code>trigger(continuous="1 second")</code> starts long-running tasks that read and write continuously, with checkpoints every interval. Latency drops to about a millisecond, at a cost:</p>
+    <ul>
+      <li>Only map-like operations (select, filter, projections); no aggregations, joins between streams or <code>dropDuplicates</code>.</li>
+      <li>At-least-once, not exactly-once.</li>
+      <li>Kafka and the rate source in, Kafka, memory and console out.</li>
+      <li>It's been experimental since Spark 2.3. In interviews, mention it exists and why it's rarely used; micro-batches with a short or default trigger cover most low-latency needs.</li>
+    </ul>
+  </section>
+
+  <section id="ui">
+    <h2>A streaming query in the Spark UI</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Where</th><th>What you see</th></tr></thead>
+      <tbody>
+        <tr><td><b>Structured Streaming</b> tab</td><td>Each query with its id and run id; charts of input rate, process rate, batch duration and state rows over time</td></tr>
+        <tr><td><b>Jobs</b> tab</td><td>One or more jobs per micro-batch, labelled with the query and batch id</td></tr>
+        <tr><td><b>SQL / DataFrame</b> tab</td><td>One plan per batch: <code>MicroBatchScan</code> or the source scan, <code>StateStoreRestore</code> / <code>StateStoreSave</code> for stateful operators, with state metrics</td></tr>
+        <tr><td><code>query.lastProgress</code></td><td>The same metrics as JSON for the last batch: rows, rates, durations by phase, watermark, state size (<a href="../operations/examples.html#progress">annotated example</a>)</td></tr>
+      </tbody></table></div>
+    <p class="small muted">The <b>id</b> stays the same across restarts from the same checkpoint; the <b>runId</b> changes on every start. Use the id to join metrics across restarts.</p>
+  </section>
+
+  <section id="dstreams">
+    <h2>Structured Streaming vs DStreams</h2>
+    <div class="tbl"><table>
+      <thead><tr><th></th><th>DStreams (Spark Streaming, legacy)</th><th>Structured Streaming</th></tr></thead>
+      <tbody>
+        <tr><td>API</td><td>RDDs per batch interval</td><td>DataFrames and SQL, optimised by Catalyst</td></tr>
+        <tr><td>Time</td><td>Processing time only</td><td>Event time with watermarks</td></tr>
+        <tr><td>Exactly-once</td><td>Hand-built</td><td>Built in with replayable sources and idempotent sinks</td></tr>
+        <tr><td>Status</td><td>Deprecated; no new features</td><td>The supported streaming API</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>Why is the offset log written before the batch runs, rather than after?</summary><div>So that after a crash Spark knows exactly which range the unfinished batch covered and can re-run that same range. If it wrote offsets afterwards, a crash mid-batch would leave Spark to plan a new, possibly different range, and an idempotent sink could no longer recognise the replay.</div></details>
+      <details><summary>Your <code>foreachBatch</code> writes to Postgres with INSERT. After a restart you see duplicates. Fix?</summary><div><code>foreachBatch</code> is at-least-once. Make the write idempotent: upsert on a natural key (<code>INSERT … ON CONFLICT DO UPDATE</code>), or store the last applied batch id in the target and skip batches already applied.</div></details>
+      <details><summary>Does a stateless query ever run a batch with no new data?</summary><div>No. No-data batches exist so stateful queries can advance the watermark and emit or drop state; a stateless query has nothing to do without new data.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+</body></html>

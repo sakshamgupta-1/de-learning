@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Operating Streams: Production Issues</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html" aria-current="page">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Operating streams</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 4 of 4 · Production issues</p>
+  <h1>Running streams at scale</h1>
+  <p class="lede">Six problems that appear once streams run for months: falling behind, small files, hot partitions, duplicates from reprocessing, crowded clusters and cost. Each follows symptom → why → confirm → fix → prevent → interview answer.</p>
+  <div class="toc">
+    <a href="#falling-behind">Falling behind</a><a href="#small-files">Small files</a><a href="#hot-partition">Hot Kafka partition</a><a href="#replay-dupes">Duplicates after reprocessing</a><a href="#crowded">Too many streams on one cluster</a><a href="#cost">Runaway cost</a>
+  </div>
+
+  <section id="falling-behind">
+    <h2>Falling behind</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Lag grows every hour; batch duration climbs above the trigger interval; data in the target is increasingly stale.</p>
+      <h3>Why it happens</h3><p>Processing rate is below input rate: input grew, a stage got slower (state, skew, a heavier MERGE), or the cluster shrank. Each batch then takes more data, which makes it slower still.</p>
+      <h3>How to confirm</h3><ol><li><code>processedRowsPerSecond</code> below <code>inputRowsPerSecond</code> across many batches.</li><li>The <code>durationMs</code> breakdown shows where the time goes: before tasks (<code>latestOffset</code>, <code>queryPlanning</code>), in the job and sink (<code>addBatch</code>), or commits.</li><li>Within <code>addBatch</code>, the Spark UI shows the slow stage, as for any job (<a href="../../spark/tuning/index.html#debug">debug flow</a>).</li></ol>
+      <h3>Fix</h3><ul><li>Fix the slow part first: skew, state size, MERGE pruning, discovery mode.</li><li>Add parallelism: more cores, more Kafka partitions or <code>minPartitions</code>.</li><li>Rate-limit batches (<code>maxOffsetsPerTrigger</code>) so a backlog drains in steady batches instead of one huge one.</li></ul>
+      <h3>Prevent</h3><ul><li>Alert on lag in minutes and on processing below input; size for peak plus catch-up headroom (<a href="examples.html#backlog">calculator</a>).</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"If processing rate is below input rate the stream falls further behind each batch. I use the duration breakdown to find whether it's discovery, the job, state or the sink, fix that, and rate-limit so catch-up happens in steady batches."</div>
+    </div>
+  </section>
+
+  <section id="small-files">
+    <h2>Small files from frequent batches</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Streaming tables have hundreds of thousands of small files; downstream reads and MERGEs slow down over weeks.</p>
+      <h3>Why it happens</h3><p>Every micro-batch writes at least one file per task. Short triggers and many shuffle partitions multiply that.</p>
+      <h3>How to confirm</h3><ol><li><code>DESCRIBE DETAIL</code>: <code>numFiles</code> high, average size in KB.</li></ol>
+      <h3>Fix</h3><ul><li>Optimized writes and auto-compaction on the table; scheduled <code>OPTIMIZE</code>.</li><li>Longer trigger interval, or <code>availableNow</code> on a schedule; fewer output partitions for small batches.</li></ul>
+      <h3>Prevent</h3><ul><li>Set compaction properties when creating streaming tables (<a href="../../spark/tuning/production.html#s-small">small files</a>).</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Micro-batches write small files by nature, so every streaming table gets optimized writes and auto-compaction, and I pick the trigger interval with file sizes in mind."</div>
+    </div>
+  </section>
+
+  <section id="hot-partition">
+    <h2>A hot Kafka partition</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Every batch has one task far longer than the others; lag sits on one partition.</p>
+      <h3>Why it happens</h3><p>Producers key by a value with a dominant key (one large customer, a null key routed to one partition), so one partition gets most of the traffic. Spark reads one task per partition by default.</p>
+      <h3>How to confirm</h3><ol><li>Per-partition offsets growth in Kafka; the Spark UI task timeline shows one long read task.</li></ol>
+      <h3>Fix</h3><ul><li><code>minPartitions</code> above the partition count so Spark splits the big partition's range across tasks.</li><li>Repartition after reading if downstream work is the heavy part.</li><li>With producers: a better key, or more partitions.</li></ul>
+      <h3>Prevent</h3><ul><li>Review partition keys when topics are designed; monitor per-partition throughput.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A hot Kafka partition becomes one slow task per batch. On the Spark side minPartitions splits it; the real fix is the producer's partition key."</div>
+    </div>
+  </section>
+
+  <section id="replay-dupes">
+    <h2>Duplicates after reprocessing</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>After restarting a stream with a new checkpoint, the target has duplicates around the restart point, or for the whole history.</p>
+      <h3>Why it happens</h3><p>A new checkpoint has no memory of what was written. Starting earlier than the last written point (safe for completeness) writes the overlap again into an append-only target.</p>
+      <h3>How to confirm</h3><ol><li>Duplicates by business key share an ingestion time from the reprocessing run.</li></ol>
+      <h3>Fix</h3><ul><li>Deduplicate the target for the overlap window.</li><li>Write reprocessing runs with MERGE on the business key, or into a fresh table that replaces the old one.</li></ul>
+      <h3>Prevent</h3><ul><li>Design targets so a replay is harmless: business keys, MERGE or <code>replaceWhere</code> by range, and a written replay runbook (<a href="index.html#replay">decision path</a>).</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A new checkpoint forgets what was written, so I start a bit early for safety and make the write idempotent with a MERGE on the business key, or rebuild into a new table and swap."</div>
+    </div>
+  </section>
+
+  <section id="crowded">
+    <h2>Too many streams on one cluster</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>A cluster running dozens of queries has slow batches across all of them, while executors are mostly idle; the driver is at high CPU or memory.</p>
+      <h3>Why it happens</h3><p>Each query plans and commits every batch on the driver, and the driver also runs every listener. Many queries with short triggers overload the driver even when executor work is small.</p>
+      <h3>How to confirm</h3><ol><li>Driver CPU and GC high; <code>queryPlanning</code> and commit durations high for every query.</li></ol>
+      <h3>Fix</h3><ul><li>Spread queries over more clusters or jobs; lengthen triggers; use scheduler pools so queries share executors fairly.</li><li>Consolidate similar streams (one query over several topics with <code>subscribePattern</code>) where semantics allow.</li></ul>
+      <h3>Prevent</h3><ul><li>Budget queries per driver, and watch driver metrics, not just executor metrics.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"With many streams on one cluster the driver becomes the bottleneck, because it plans and commits every batch of every query. I spread queries out, lengthen triggers and watch driver load."</div>
+    </div>
+  </section>
+
+  <section id="cost">
+    <h2>Runaway cost</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Streaming compute is the largest line in the bill, though most streams carry little data most of the day.</p>
+      <h3>Why it happens</h3><p>Always-on clusters, sized for peak, for streams whose consumers only need hourly or daily freshness.</p>
+      <h3>How to confirm</h3><ol><li>Cluster utilisation and records per hour per stream against their real freshness requirement.</li></ol>
+      <h3>Fix</h3><ul><li>Move low-urgency streams to <code>availableNow</code> on a schedule, keeping their checkpoints.</li><li>Group small streams on shared clusters or in one Lakeflow pipeline with enhanced autoscaling.</li><li>Right-size: smaller, fewer workers for low-volume streams.</li></ul>
+      <h3>Prevent</h3><ul><li>Set a freshness SLA per stream at design time and choose the trigger from it; review cost per stream regularly.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"I set a freshness requirement per stream and choose the trigger from it. Anything that tolerates minutes of delay runs as availableNow on a schedule: same incremental semantics, but the cluster is off most of the time."</div>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../index.html"><span>Area</span><b>Structured Streaming</b></a>
+  </nav>
+</div></main>
+</body></html>

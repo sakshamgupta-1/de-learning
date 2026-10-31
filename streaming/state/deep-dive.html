@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>State, Windows and Watermarks: Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html" aria-current="page">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">State, windows &amp; watermarks</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 2 of 4 · Deep dive</p>
+  <h1>How state really works</h1>
+  <p class="lede">Where state lives between batches, how it's checkpointed, exactly when watermarks advance and evict, how join state is cleaned up, and what to reach for when built-in operators aren't enough.</p>
+  <div class="toc">
+    <a href="#store-internals">State store internals</a><a href="#rocksdb">RocksDB tuning</a><a href="#watermark-rules">Watermark rules</a><a href="#join-state">Join state</a><a href="#arbitrary">Arbitrary state</a><a href="#inspect">Inspecting state</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="store-internals">
+    <h2>State store internals</h2>
+    <ol class="rail">
+      <li><div><b>Partitioned like a shuffle.</b> A stateful operator first shuffles rows by its key, so each key's rows and state meet in the same task. State partition <i>n</i> lives on whichever executor runs task <i>n</i>.</div></li>
+      <li><div><b>Versioned per batch.</b> At the end of batch <i>N</i>, each partition's changes are saved to <code>state/&lt;operator&gt;/&lt;partition&gt;/</code> in the checkpoint as version <i>N</i>.</div></li>
+      <li><div><b>Locality.</b> Spark tries to schedule partition <i>n</i> on the executor that already holds it in memory. If the executor is lost, another task reloads the latest version from the checkpoint.</div></li>
+      <li><div><b>Cleanup.</b> Old versions beyond <code>minBatchesToRetain</code> are deleted by a maintenance task in the background.</div></li>
+    </ol>
+    <div class="tbl"><table>
+      <thead><tr><th></th><th>HDFS-backed (default)</th><th>RocksDB</th></tr></thead>
+      <tbody>
+        <tr><td>In memory</td><td>All state for loaded partitions, as JVM objects (plus a cached copy of recent versions)</td><td>Block cache and write buffers; the rest on local disk</td></tr>
+        <tr><td>Per-batch checkpoint</td><td>A <code>.delta</code> file of changed keys; periodic <code>.snapshot</code></td><td>New SST files, or only a changelog with changelog checkpointing</td></tr>
+        <tr><td>Failure mode at scale</td><td>Long GC pauses, executor OOM</td><td>Local disk and memory sizing; slow uploads without changelog checkpointing</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="rocksdb">
+    <h2>RocksDB settings worth knowing</h2>
+<pre><code>spark.conf.set("spark.sql.streaming.stateStore.providerClass",
+    "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
+spark.conf.set("spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled", "true")
+<span class="muted"># optional: cap memory per executor across all RocksDB instances</span>
+spark.conf.set("spark.sql.streaming.stateStore.rocksdb.boundedMemoryUsage", "true")</code></pre>
+    <ul>
+      <li><b>Set before the first run.</b> The provider is recorded in the checkpoint; switching later needs a new checkpoint.</li>
+      <li><b>Changelog checkpointing</b> uploads only the changed keys each batch and snapshots in the background, which cuts batch latency for large state.</li>
+      <li><b>Metrics:</b> state operator progress includes RocksDB timings (commit, flush, compaction) and memory use; rising commit time is the first sign the store is struggling.</li>
+      <li>On Databricks, RocksDB is recommended for stateful workloads, and the same configs apply.</li>
+    </ul>
+  </section>
+
+  <section id="watermark-rules">
+    <h2>Watermark rules, precisely</h2>
+    <ul>
+      <li><b>Computed at the end of a batch</b> as max event time seen − delay, and <b>used from the next batch</b>. It never moves backwards.</li>
+      <li><b>Late rows</b> are filtered using the watermark in effect for the current batch.</li>
+      <li><b>Eviction:</b> append mode writes and deletes a window when <code>window.end &lt;= watermark</code>. Update mode writes changes every batch and deletes the window's state at the same point.</li>
+      <li><b>No-data batches</b> run when the watermark has moved but no new data arrived, so results aren't held back by a quiet source. A source that goes completely quiet, though, never moves the watermark, so the last windows wait until the next event.</li>
+      <li><b>Several inputs</b> (union, joins): each has its own watermark; the global one is their minimum by default (<code>multipleWatermarkPolicy</code>).</li>
+      <li><b>Complete mode</b> ignores the watermark for cleanup, since it must output every row ever produced.</li>
+      <li>The watermark must be on the <b>same column</b> the window or event-time condition uses, and applied <b>before</b> the stateful operator.</li>
+    </ul>
+  </section>
+
+  <section id="join-state">
+    <h2>How join state is cleaned up</h2>
+    <p>For <code>click_ts BETWEEN imp_ts AND imp_ts + INTERVAL 1 hour</code> with watermarks of 2 hours on impressions and 3 hours on clicks:</p>
+    <ul>
+      <li>An <b>impression</b> can still match clicks up to 1 hour after it. Clicks arrive up to 3 hours late. So Spark keeps an impression until the click watermark passes <code>imp_ts + 1 hour</code>.</li>
+      <li>A <b>click</b> can match impressions up to 1 hour before it, which arrive up to 2 hours late. So it's kept until the impression watermark passes <code>click_ts</code>.</li>
+      <li>For a <b>left outer</b> join, the impression's null row is written when it's evicted without a match, which is why outer join results are delayed by the watermark delay plus the time bound.</li>
+    </ul>
+    <div class="tbl"><table>
+      <thead><tr><th>Join type (stream-stream)</th><th>Watermarks / time bound</th></tr></thead>
+      <tbody>
+        <tr><td>Inner</td><td>Optional; needed to clean up state</td></tr>
+        <tr><td>Left / right outer</td><td>Required on the outer side's partner, with a time bound</td></tr>
+        <tr><td>Full outer (Spark 3.1+), left semi (Spark 3.1+)</td><td>Required, with a time bound</td></tr>
+      </tbody></table></div>
+    <p class="small muted">State size estimate for a join: <a href="examples.html#join-state">calculator</a>.</p>
+  </section>
+
+  <section id="arbitrary">
+    <h2>Arbitrary stateful processing</h2>
+    <p>When windows, aggregations and joins don't express the logic (custom sessionisation, alerts on sequences, per-key state machines), use an API that hands you state per key:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>API</th><th>Language</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>mapGroupsWithState</code> / <code>flatMapGroupsWithState</code></td><td>Scala, Java</td><td>One state object per key, optional timeouts</td></tr>
+        <tr><td><code>applyInPandasWithState</code> (Spark 3.4+)</td><td>Python</td><td>pandas DataFrames per key, one state per key, timeouts</td></tr>
+        <tr><td><code>transformWithState</code> (Spark 4.0+)</td><td>Scala, Java; <code>transformWithStateInPandas</code> for Python</td><td>Several typed state variables (value, list, map) per key, timers, state TTL, schema evolution</td></tr>
+      </tbody></table></div>
+    <p>Always give state a lifetime: a timeout, a TTL, or explicit removal. State without one grows forever, just like a stream-stream join without watermarks.</p>
+  </section>
+
+  <section id="inspect">
+    <h2>Inspecting state</h2>
+    <ul>
+      <li><b>Progress metrics</b> per stateful operator: <code>numRowsTotal</code>, <code>numRowsUpdated</code>, <code>numRowsRemoved</code>, <code>memoryUsedBytes</code>, <code>numRowsDroppedByWatermark</code>.</li>
+      <li><b>State data source</b> (Spark 4.0+, and on recent Databricks runtimes): read a checkpoint's state as a table to debug it, e.g. <code>spark.read.format("statestore").load("/chk/q1")</code>, and <code>format("state-metadata")</code> for the operators.</li>
+      <li><b>SQL tab:</b> the stateful operator node shows rows in state and time spent committing state per batch.</li>
+    </ul>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>The last hour of windows is never written on Sunday nights, when traffic stops. Why?</summary><div>The watermark only moves when new events arrive. With no events, it stays where it was, so the last windows never pass it until Monday's first events. Options: accept the delay, send heartbeat events, or use update mode so partial results are visible.</div></details>
+      <details><summary>Why can't you add RocksDB to an existing query by just changing the config?</summary><div>The provider is part of the checkpoint metadata, and the state files are in the old provider's format. Switching needs a new checkpoint, which means rebuilding state (reprocessing enough history) or accepting a fresh start.</div></details>
+      <details><summary>A custom <code>applyInPandasWithState</code> job's state grows forever. Where do you look first?</summary><div>Whether state is ever removed: a timeout configured and handled (calling <code>state.remove()</code> when it fires), or keys removed when their logic completes.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+</body></html>

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>State, Windows and Watermarks: Production Issues</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html" aria-current="page">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">State, windows &amp; watermarks</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 2 of 4 · Production issues</p>
+  <h1>When state goes wrong</h1>
+  <p class="lede">Stateful streams fail slowly: state creeps up for weeks, or data disappears without an error. Each issue follows symptom → why → confirm → fix → prevent → interview answer.</p>
+  <div class="toc">
+    <a href="#unbounded">State that never stops growing</a><a href="#dropped">Data silently dropped</a><a href="#memory">Executor memory pressure</a><a href="#slow-commit">Slow state commits</a><a href="#schema">Query change breaks the checkpoint</a><a href="#stuck-results">Results that never appear</a>
+  </div>
+
+  <section id="unbounded">
+    <h2>State that never stops growing</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Batch duration and executor memory rise week after week with flat input volume, until executors fail.</p>
+      <h3>Why it happens</h3><p>Something keeps state without a way to expire it: an aggregation or <code>dropDuplicates</code> without a watermark, a stream-stream join without watermarks and a time bound, the watermark on a different column than the window, or custom state without timeouts.</p>
+      <h3>How to confirm</h3><ol><li><code>stateOperators[].numRowsTotal</code> in the progress metrics only goes up; <code>numRowsRemoved</code> stays at 0.</li><li>Check each stateful operator for a watermark on the column it groups or joins by.</li></ol>
+      <h3>Fix</h3><ul><li>Add the missing watermark (and event-time column in dedup keys, or a time range in joins), or timeouts for custom state.</li><li>Adding a watermark changes the state's meaning: plan a new checkpoint and a state rebuild (<a href="../operations/index.html#replay">replay</a>).</li></ul>
+      <h3>Prevent</h3><ul><li>Review rule: every stateful operator needs a stated lifetime. Alert on state rows growing faster than input.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Unbounded state almost always means a stateful operator without a watermark, or a join without a time bound. I confirm it from numRowsTotal never decreasing, then add the watermark, which usually means a new checkpoint."</div>
+    </div>
+  </section>
+
+  <section id="dropped">
+    <h2>Data silently dropped as late</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Streaming aggregates are lower than a batch recount of the same period, especially after an upstream outage or a device fleet coming back online.</p>
+      <h3>Why it happens</h3><p>After a delay, events arrive older than the watermark and are dropped. The watermark is driven by the <b>newest</b> event, so one source or partition running ahead can push it past data others haven't delivered yet.</p>
+      <h3>How to confirm</h3><ol><li><code>numRowsDroppedByWatermark</code> is non-zero around the gap.</li><li>Compare event time with ingestion time in Bronze for the missing rows.</li></ol>
+      <h3>Fix</h3><ul><li>Recompute the affected windows in batch from Bronze and overwrite them.</li><li>Increase the delay if regular lateness exceeds it; use update mode with MERGE so late rows correct results instead of being dropped.</li></ul>
+      <h3>Prevent</h3><ul><li>Set the delay from the measured lateness distribution (for example its 99.9th percentile), keep raw Bronze, and alert on dropped rows.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"The watermark drops rows silently, so I monitor numRowsDroppedByWatermark, size the delay from measured lateness, and keep raw Bronze so I can recompute windows after an outage."</div>
+    </div>
+  </section>
+
+  <section id="memory">
+    <h2>Executor memory pressure from state</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Long GC pauses and executor OOMs in the stateful stage; restarts take minutes as state reloads.</p>
+      <h3>Why it happens</h3><p>The default provider keeps state as JVM objects on the heap, plus cached versions. Millions of keys per executor overwhelm the heap.</p>
+      <h3>How to confirm</h3><ol><li><code>memoryUsedBytes</code> per operator is a large share of executor memory.</li><li>GC time in the stateful stage is high (<a href="../../spark/tuning/deep-dive.html#gc">GC signals</a>).</li></ol>
+      <h3>Fix</h3><ul><li>Move to the RocksDB provider with changelog checkpointing (needs a new checkpoint).</li><li>Reduce state: shorter watermark, fewer or narrower columns in state.</li><li>More memory per executor, or more executors so partitions spread out.</li></ul>
+      <h3>Prevent</h3><ul><li>Estimate state size before launch (<a href="examples.html#join-state">calculator</a>) and start sizeable stateful queries on RocksDB.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"The default state store lives on the heap, so large state means GC pauses and OOMs. I use RocksDB with changelog checkpointing for anything sizeable, and keep state lean with tight watermarks."</div>
+    </div>
+  </section>
+
+  <section id="slow-commit">
+    <h2>Slow state commits</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Batches take much longer than the processing itself; the duration breakdown shows time going to commit or state maintenance.</p>
+      <h3>Why it happens</h3><p>Every batch uploads state changes to the checkpoint. With large state, uploading full RocksDB files, or many small delta files on slow storage, dominates.</p>
+      <h3>How to confirm</h3><ol><li><code>stateOperators[].commitTimeMs</code> in the progress metrics, and the RocksDB commit timings, grow with state size.</li></ol>
+      <h3>Fix</h3><ul><li>Enable changelog checkpointing.</li><li>Use a longer trigger interval so commits happen less often.</li><li>Check state partition count: too many tiny partitions multiply per-partition overhead.</li></ul>
+      <h3>Prevent</h3><ul><li>Choose shuffle partitions for a stateful query deliberately before its first run; it's fixed afterwards.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"When commit time dominates, it's state checkpointing. Changelog checkpointing on RocksDB uploads only the changes; I also check the trigger interval and the state partition count, which is fixed at the first run."</div>
+    </div>
+  </section>
+
+  <section id="schema">
+    <h2>A query change breaks the checkpoint</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>After a code change, the query fails on start with a state schema incompatibility or "the number of stateful operators changed" style error.</p>
+      <h3>Why it happens</h3><p>State is stored in the schema of the original grouping keys and aggregates. Changing keys, aggregations, join type, the number of stateful operators or their order makes the old state unreadable.</p>
+      <h3>How to confirm</h3><ol><li>The error names the operator and the old and new state schema.</li><li>Diff the stateful part of the query against the last deployed version.</li></ol>
+      <h3>Fix</h3><ul><li>Revert, or start a new checkpoint and rebuild state by reprocessing enough history (<a href="../operations/index.html#replay">replay playbook</a>).</li></ul>
+      <h3>Prevent</h3><ul><li>Treat stateful logic changes as migrations: plan the new checkpoint and backfill. Stateless changes (filters, projections) are usually safe.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"State is stored in the shape of the original query, so changing keys or aggregations needs a new checkpoint. I plan those as migrations with a backfill, whereas filters and projections can change in place."</div>
+    </div>
+  </section>
+
+  <section id="stuck-results">
+    <h2>Results that never appear</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>An append-mode windowed table stops getting new rows, though the source still has recent data, or the last windows of the day never arrive.</p>
+      <h3>Why it happens</h3><ul><li>The watermark only advances with new events; a quiet source holds it still.</li><li>With several inputs, the minimum watermark follows the slowest one; an idle Kafka partition or a dead upstream holds everything back.</li></ul>
+      <h3>How to confirm</h3><ol><li>The <code>eventTime.watermark</code> in progress hasn't moved for hours.</li><li>Check per-input event times for one stuck behind the rest.</li></ol>
+      <h3>Fix</h3><ul><li>Fix or remove the idle input; consider <code>multipleWatermarkPolicy=max</code> only if dropping the slow input's late data is acceptable.</li><li>Send heartbeat events, or use update mode so partial results are visible.</li></ul>
+      <h3>Prevent</h3><ul><li>Alert on watermark lag (now − watermark) as well as batch freshness.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Append mode waits for the watermark, and the watermark only moves with new events from every input. I alert on watermark lag so a quiet or stuck input shows up before users notice missing results."</div>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../sources-sinks/index.html"><span>Next · Module 3</span><b>Sources &amp; sinks</b></a>
+  </nav>
+</div></main>
+</body></html>

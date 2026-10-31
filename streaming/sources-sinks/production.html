@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Streaming Sources and Sinks: Production Issues</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html" aria-current="page">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Sources &amp; sinks</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 3 of 4 · Production issues</p>
+  <h1>When ingestion breaks</h1>
+  <p class="lede">Six failures at the edges of a stream: discovering files, schema drift, Kafka retention, bad messages, MERGE targets and upstream rewrites. Each follows symptom → why → confirm → fix → prevent → interview answer.</p>
+  <div class="toc">
+    <a href="#slow-discovery">Slow file discovery</a><a href="#schema-change">Schema change stops the stream</a><a href="#kafka-loss">Kafka data loss</a><a href="#poison">Undecodable messages</a><a href="#merge">MERGE failures</a><a href="#upstream-rewrite">Upstream rewrite breaks a Delta source</a>
+  </div>
+
+  <section id="slow-discovery">
+    <h2>Slow file discovery</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Batches spend most of their time before any task runs; runtime grows month by month with flat daily volume.</p>
+      <h3>Why it happens</h3><p>Directory listing examines every file in the folder each batch, so its cost tracks the folder's total size.</p>
+      <h3>How to confirm</h3><ol><li>A long gap before the first job of each batch in the Spark UI (driver-side listing).</li><li><code>durationMs.latestOffset</code> / <code>getBatch</code> in the progress metrics is large and growing.</li></ol>
+      <h3>Fix</h3><ul><li>Switch to file notifications or managed file events. The discovery mode can change across restarts while keeping the checkpoint.</li><li>Move processed files out of the landing folder once they're safely ingested (a storage lifecycle rule after a retention period).</li></ul>
+      <h3>Prevent</h3><ul><li>Choose discovery mode from the expected folder size; date-partition landing paths.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Listing cost grows with the whole folder, so a stream that slows down while volume is flat is usually discovery. I move it to file notifications or managed file events and archive processed files."</div>
+    </div>
+  </section>
+
+  <section id="schema-change">
+    <h2>A schema change stops the stream</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>The Bronze stream fails with <code>UnknownFieldException</code> after a source adds a column; or, worse, keeps running while a type change sends values to <code>_rescued_data</code>.</p>
+      <h3>Why it happens</h3><p>With <code>addNewColumns</code>, Auto Loader fails once on purpose so the schema can be updated; a job without retries stays failed. Type changes don't evolve the schema; mismatching values are rescued.</p>
+      <h3>How to confirm</h3><ol><li>The exception names the new fields; the schema location has a new version.</li><li>Rescued rows: <code>SELECT count(*) FROM bronze.x WHERE _rescued_data IS NOT NULL</code> by day.</li></ol>
+      <h3>Fix</h3><ul><li>Restart (or let retries restart) to pick up new columns; make sure the sink allows schema evolution (<code>mergeSchema</code>).</li><li>For type changes: update schema hints, reprocess affected files, and fix downstream casts.</li></ul>
+      <h3>Prevent</h3><ul><li>Run with retries; alert on rescued data; agree schema change rules with the source team (a data contract).</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Auto Loader's default evolution mode fails once on a new column and continues after a restart, so I always run it with retries. Type changes don't evolve; they land in rescued data, which I monitor as a drift signal."</div>
+    </div>
+  </section>
+
+  <section id="kafka-loss">
+    <h2>Kafka data loss</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>The query fails with "Some data may have been lost because they are not available in Kafka any more", typically after an outage or a long pause.</p>
+      <h3>Why it happens</h3><p>The topic's retention deleted messages before the stream read them: the next offset in the checkpoint is older than the earliest offset still in Kafka.</p>
+      <h3>How to confirm</h3><ol><li>Compare the checkpoint's last offsets with the partition's earliest offset.</li><li>Check the outage length against <code>retention.ms</code>.</li></ol>
+      <h3>Fix</h3><ul><li>Recover the missing range from another copy (a mirror, an archive, the source system).</li><li>If it's truly gone, restart deliberately past the gap and record it; <code>failOnDataLoss=false</code> only for streams where gaps are acceptable.</li></ul>
+      <h3>Prevent</h3><ul><li>Retention comfortably longer than the worst recovery time; alert on consumer lag in time ("minutes behind"), not just records.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"That error means retention outran the consumer. Spark fails by default rather than silently skipping, which is right. I recover the range from another copy if I can, and prevent it with retention sized to recovery time and lag alerts."</div>
+    </div>
+  </section>
+
+  <section id="poison">
+    <h2>Undecodable messages</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>One bad message fails every batch from that point (a crash loop), or decoded rows are suddenly all null.</p>
+      <h3>Why it happens</h3><p>A producer wrote with an unregistered or incompatible schema, plain JSON on an Avro topic, or a corrupted payload. <code>from_avro</code> fails in its default <code>FAILFAST</code> mode; in <code>PERMISSIVE</code> mode it returns nulls.</p>
+      <h3>How to confirm</h3><ol><li>Read the failing offset range in batch and inspect the first bytes (magic byte, schema id).</li><li>Check the registry for the schema id found.</li></ol>
+      <h3>Fix</h3><ul><li>Decode permissively and route rows that fail to decode to a quarantine table, with topic, partition and offset.</li><li>Fix the producer; replay quarantined messages once decodable.</li></ul>
+      <h3>Prevent</h3><ul><li>Enforce schemas at the producer (registry-aware serialisers, compatibility checks in CI); alert on quarantine volume.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"I never let one bad message stop a pipeline: I decode permissively, quarantine failures with their offsets, and alert on that table. The real fix is schema enforcement at the producer."</div>
+    </div>
+  </section>
+
+  <section id="merge">
+    <h2>MERGE failures in <code>foreachBatch</code></h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Batches fail with "multiple source rows matched", or with <code>ConcurrentAppendException</code> / <code>ConcurrentDeleteReadException</code>; or the MERGE gets slower every week.</p>
+      <h3>Why it happens</h3><ul><li>Several changes for one key in a batch.</li><li>Another job writes the same table, or files the MERGE read were rewritten (OPTIMIZE, another MERGE) during the batch.</li><li>The MERGE condition can't prune the target, so every batch scans the whole table.</li></ul>
+      <h3>How to confirm</h3><ol><li>The exception type; the table history (<code>DESCRIBE HISTORY</code>) around the failure.</li><li>MERGE metrics: target files scanned vs rewritten.</li></ol>
+      <h3>Fix</h3><ul><li>Deduplicate the batch to one row per key.</li><li>Avoid concurrent writers on the same files: partition or cluster so they touch disjoint data, schedule OPTIMIZE apart, rely on retries (the batch is replayed safely if the MERGE is idempotent).</li><li>Add a pruning predicate (date or cluster key) to the MERGE condition; enable deletion vectors.</li></ul>
+      <h3>Prevent</h3><ul><li>Treat every streaming MERGE as replayable and concurrent: dedupe, version guard, pruning predicate.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Streaming MERGE needs one row per key per batch, a version guard so replays are harmless, and a predicate that prunes the target. Concurrency conflicts get retried, which is safe because the MERGE is idempotent."</div>
+    </div>
+  </section>
+
+  <section id="upstream-rewrite">
+    <h2>An upstream rewrite breaks a Delta source</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>A Silver stream reading Bronze fails with an error saying the source table had an update or delete, right after a backfill, GDPR delete or MERGE on Bronze.</p>
+      <h3>Why it happens</h3><p>The Delta streaming source only supports appends; a commit that changes existing rows can't be expressed as new rows.</p>
+      <h3>How to confirm</h3><ol><li><code>DESCRIBE HISTORY bronze.x</code> shows a DELETE, UPDATE or MERGE at the failing version.</li></ol>
+      <h3>Fix</h3><ul><li>Restart with <code>skipChangeCommits=true</code> and apply the correction downstream separately.</li><li>If downstream must follow upstream changes, stream the change feed and MERGE it instead (<a href="examples.html#change-feed">example</a>).</li></ul>
+      <h3>Prevent</h3><ul><li>Keep Bronze append-only; route corrections through new rows, and plan GDPR deletes across layers.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A Delta stream source is append-only. When upstream rewrites rows, I either skip change commits and handle the correction downstream, or switch to the change feed with a MERGE so updates and deletes propagate."</div>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../operations/index.html"><span>Next · Module 4</span><b>Operating streams</b></a>
+  </nav>
+</div></main>
+</body></html>

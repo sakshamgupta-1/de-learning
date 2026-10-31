@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Structured Streaming Fundamentals: Production Issues</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html" aria-current="page">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Streaming fundamentals</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 1 of 4 · Production issues</p>
+  <h1>When streams misbehave</h1>
+  <p class="lede">Five failures that come from the basics: the micro-batch loop, checkpoints, triggers and output modes. Each follows symptom → why → confirm → fix → prevent → interview answer.</p>
+  <div class="toc">
+    <a href="#duplicates">Duplicates after restart</a><a href="#checkpoint-lost">Lost or shared checkpoint</a><a href="#first-batch">Huge first batch</a><a href="#append-error">Append-mode error</a><a href="#job-ends">Job ends, stream stops</a>
+  </div>
+
+  <section id="duplicates">
+    <h2>Duplicates after a restart</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>After a failure or redeploy, the target has some rows twice, always in batch-sized groups.</p>
+      <h3>Why it happens</h3><p>The batch in flight is replayed on restart. A Delta or file sink skips it; <code>foreachBatch</code>, the Kafka sink and <code>foreach</code> don't, so a plain append or INSERT runs twice.</p>
+      <h3>How to confirm</h3><ol><li>Group the duplicates by ingestion time or batch: they cluster around the restart.</li><li>Check the sink: is the write inside <code>foreachBatch</code>, to Kafka, or to an external database?</li></ol>
+      <h3>Fix</h3><ul><li>Delta inside <code>foreachBatch</code>: pass <code>txnAppId</code> and <code>txnVersion=batch_id</code>.</li><li>Upserts: deduplicate the batch by key, then MERGE.</li><li>Kafka sink: make consumers idempotent (dedupe on a key), since the Kafka sink is at-least-once.</li><li>Clean the existing duplicates with a one-off dedup.</li></ul>
+      <h3>Prevent</h3><ul><li>Treat every <code>foreachBatch</code> as "will be called twice with the same batch id" in code review, and test it by killing a query mid-batch.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"The batch in flight is always replayed on restart, so exactly-once depends on the sink. Delta sinks skip replays by batch id; for foreachBatch I make the write idempotent with txnAppId and txnVersion, or a MERGE on a deduplicated batch."</div>
+    </div>
+  </section>
+
+  <section id="checkpoint-lost">
+    <h2>A lost, deleted or shared checkpoint</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>After someone "cleaned up" a folder, the stream either reprocesses everything from the start, or silently skips data. Or two jobs keep failing with conflicting batch errors.</p>
+      <h3>Why it happens</h3><ul><li>Without a checkpoint, a query starts fresh from its starting position: Kafka's default <code>startingOffsets</code> is <b>latest</b>, so data in between is skipped; file and Auto Loader sources reprocess every existing file.</li><li>Two queries writing to one checkpoint location overwrite each other's offset and commit logs.</li></ul>
+      <h3>How to confirm</h3><ol><li>Check the checkpoint path still has <code>offsets/</code> and <code>commits/</code> with recent batch ids.</li><li>Search job definitions for the same <code>checkpointLocation</code> used twice.</li><li>Compare the query <b>id</b> before and after: a new id means a new checkpoint.</li></ol>
+      <h3>Fix</h3><ul><li>Restore the checkpoint from storage versioning or backup if possible.</li><li>Otherwise restart deliberately: set <code>startingOffsets</code> (Kafka), <code>startingVersion</code> (Delta source) or <code>modifiedAfter</code> (Auto Loader) to the last processed point, and dedupe the overlap (<a href="../operations/index.html#replay">replay playbook</a>).</li><li>Give each query its own checkpoint.</li></ul>
+      <h3>Prevent</h3><ul><li>Derive checkpoint paths from the target table name; keep them out of folders that lifecycle rules or clean-up jobs touch; restrict delete permissions.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"The checkpoint is the stream's memory: losing it means the source decides where to start, which for Kafka defaults to latest and skips data. I keep one checkpoint per query, protected from clean-up, and if one is lost I restart from an explicit position and dedupe the overlap."</div>
+    </div>
+  </section>
+
+  <section id="first-batch">
+    <h2>A huge first batch</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>A new stream, or one restarted after a long pause, runs one enormous batch that spills, runs out of memory or takes hours. Later batches are fine.</p>
+      <h3>Why it happens</h3><p>Without rate limits, the first batch takes everything available: all of a Kafka topic from <code>earliest</code>, every existing file in a folder, or a long backlog. The deprecated <code>once</code> trigger ignores rate limits entirely.</p>
+      <h3>How to confirm</h3><ol><li><code>lastProgress["numInputRows"]</code> for batch 0 is orders of magnitude above later batches.</li><li>The source options have no <code>maxOffsetsPerTrigger</code> / <code>maxFilesPerTrigger</code> / <code>maxBytesPerTrigger</code>.</li></ol>
+      <h3>Fix</h3><ul><li>Set a rate limit so the backlog is processed in many right-sized batches.</li><li>Use <code>availableNow</code> rather than <code>once</code>.</li><li>For very large histories, backfill with a batch job, then start the stream from the end of the backfill.</li></ul>
+      <h3>Prevent</h3><ul><li>Always set a rate limit on Kafka and file sources; size it so one batch finishes well inside the trigger interval.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"The first batch of a new stream takes the whole backlog unless I set maxOffsetsPerTrigger or maxFilesPerTrigger. I always set one, use availableNow instead of once, and backfill large histories separately."</div>
+    </div>
+  </section>
+
+  <section id="append-error">
+    <h2>"Append output mode not supported"</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>The query fails at start with <code>AnalysisException: Append output mode not supported when there are streaming aggregations on streaming DataFrames/DataSets without watermark</code>.</p>
+      <h3>Why it happens</h3><p>Append writes only rows that will never change. An aggregation without a watermark can always change, so Spark can't know when a row is final.</p>
+      <h3>How to confirm</h3><ol><li>The plan has an aggregation (<code>groupBy</code> or a window) and no <code>withWatermark</code> on its event-time column.</li></ol>
+      <h3>Fix</h3><ul><li>Add <code>withWatermark</code> and group by a time window, so append writes each window once it closes.</li><li>Or use update mode with <code>foreachBatch</code> + MERGE, or complete mode for small results.</li></ul>
+      <h3>Prevent</h3><ul><li>Decide the output mode when designing the query, from what the target needs: final rows (append + watermark) or current values (update + MERGE).</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Append needs to know when a row is final. With an aggregation that comes from a watermark and a window; otherwise I use update mode and MERGE into the target."</div>
+    </div>
+  </section>
+
+  <section id="job-ends">
+    <h2>The job finishes but the stream stopped</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>A scheduled job reports success after seconds, but no data was written. Or a long-running stream died hours ago and nothing alerted.</p>
+      <h3>Why it happens</h3><ul><li><code>start()</code> returns immediately; if the script ends, the application stops the query with it.</li><li>A query that throws stops on its own; unless something checks it, the cluster or job may look healthy.</li></ul>
+      <h3>How to confirm</h3><ol><li>The driver log shows the query starting and the application exiting right after.</li><li><code>spark.streams.active</code> is empty; <code>q.exception()</code> holds the error.</li></ol>
+      <h3>Fix</h3><ul><li>End the script with <code>q.awaitTermination()</code> (or <code>spark.streams.awaitAnyTermination()</code> for several queries) so failures fail the job.</li><li>Let the job's retry policy restart failed streams.</li></ul>
+      <h3>Prevent</h3><ul><li>Alert on query failure and on freshness (time since last batch), not only on job status (<a href="../operations/index.html#monitoring">monitoring</a>).</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"start() is non-blocking, so a job needs awaitTermination to surface failures. In production I run streams as jobs with retries and alert on freshness and query failures, not just job status."</div>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="../state/index.html"><span>Next · Module 2</span><b>State, windows &amp; watermarks</b></a>
+  </nav>
+</div></main>
+</body></html>

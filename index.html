@@ -16,6 +16,7 @@
     <a href="spark/execution/index.html">3 · Execution</a>
     <a href="spark/optimizer/index.html">4 · Optimizer &amp; AQE</a>
     <a href="spark/tuning/index.html">5 · Tuning &amp; debug</a>
+    <a href="streaming/index.html">Streaming</a>
   </nav>
 </div></header>
 
@@ -66,7 +67,35 @@
           <div class="ft"><span>≈75 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
       </div>
-      <p class="small muted" style="margin-top:1rem">Suggested order after Spark Core: Structured Streaming → Delta Lake &amp; Databricks → Iceberg → Modelling &amp; SQL → Pipelines → Governance. Ask in chat and the next path gets built into this hub.</p>
+      <p class="small muted" style="margin-top:1rem">Suggested order after Spark Core: Structured Streaming (below) → Delta Lake &amp; Databricks → Iceberg → Modelling &amp; SQL → Pipelines → Governance. Ask in chat and the next path gets built into this hub.</p>
+    </section>
+
+    <section>
+      <p class="eyebrow">Next</p>
+      <h2>Structured Streaming path</h2>
+      <p class="muted">Four modules that build on Spark Core: the micro-batch model, state and time, sources and sinks, and running streams in production. <a href="streaming/index.html">Path overview</a></p>
+      <div class="paths">
+        <a class="mod" href="streaming/fundamentals/index.html" data-g="stream" data-mod="sfun">
+          <span class="n">Module 1</span><b>Streaming fundamentals</b>
+          <p>Micro-batch loop, triggers, output modes, stateless vs stateful, checkpoints and exactly-once.</p>
+          <div class="ft"><span>≈45 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+        <a class="mod" href="streaming/state/index.html" data-g="stream" data-mod="sstate">
+          <span class="n">Module 2</span><b>State, windows &amp; watermarks</b>
+          <p>Window types, watermarks and late data, the state store and RocksDB, stream-stream joins.</p>
+          <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+        <a class="mod" href="streaming/sources-sinks/index.html" data-g="stream" data-mod="ssrc">
+          <span class="n">Module 3</span><b>Sources &amp; sinks</b>
+          <p>Auto Loader, Kafka offsets, Avro and schema registry, foreachBatch and MERGE.</p>
+          <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+        <a class="mod" href="streaming/operations/index.html" data-g="stream" data-mod="sops">
+          <span class="n">Module 4</span><b>Operating streams</b>
+          <p>Bottlenecks, monitoring, replay and reprocessing, cost.</p>
+          <div class="ft"><span>≈45 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
+      </div>
     </section>
 
     <section>
@@ -85,7 +114,7 @@
 </main>
 
 <script>
-const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark/tuning/index.html",TD="spark/tuning/deep-dive.html",TE="spark/tuning/examples.html",TP="spark/tuning/production.html";
+const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark/tuning/index.html",TD="spark/tuning/deep-dive.html",TE="spark/tuning/examples.html",TP="spark/tuning/production.html",SF="streaming/fundamentals/index.html",SS="streaming/state/index.html",SK="streaming/sources-sinks/index.html",SO="streaming/operations/index.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
@@ -117,20 +146,20 @@ const GROUPS=[
   ["toPandas, Arrow and the pandas API on Spark",P+"#topandas","abs"],
   ["Apache Arrow and vectorised execution (pandas UDFs)",V+"#arrow","abs"]]},
  {id:"stream",name:"Structured Streaming",items:[
-  ["Different output modes in Structured Streaming"],
-  ["How to handle late data in Structured Streaming"],
-  ["Common performance bottlenecks in Structured Streaming"],
-  ["Trigger types (processingTime, availableNow, continuous)"],
-  ["Checkpointing and exactly-once guarantees"],
-  ["foreachBatch and MERGE for streaming upserts"],
-  ["Stateful operations and the RocksDB state store"],
-  ["Stream-stream joins and watermarks"],
-  ["Auto Loader: directory listing vs file notification"],
-  ["Kafka offsets, consumer groups and delivery semantics"],
-  ["Kafka with Avro and a schema registry: schema compatibility modes"],
-  ["Stateless vs stateful streaming"],
-  ["Window types: tumbling, sliding and session windows"],
-  ["Replaying and reprocessing a stream (checkpoints, offsets, full refresh)"]]},
+  ["Different output modes in Structured Streaming",SF+"#output-modes","sfun"],
+  ["How to handle late data in Structured Streaming",SS+"#watermarks","sstate"],
+  ["Common performance bottlenecks in Structured Streaming",SO+"#bottlenecks","sops"],
+  ["Trigger types (processingTime, availableNow, continuous)",SF+"#triggers","sfun"],
+  ["Checkpointing and exactly-once guarantees",SF+"#exactly-once","sfun"],
+  ["foreachBatch and MERGE for streaming upserts",SK+"#foreachbatch","ssrc"],
+  ["Stateful operations and the RocksDB state store",SS+"#state-store","sstate"],
+  ["Stream-stream joins and watermarks",SS+"#joins","sstate"],
+  ["Auto Loader: directory listing vs file notification",SK+"#autoloader","ssrc"],
+  ["Kafka offsets, consumer groups and delivery semantics",SK+"#kafka","ssrc"],
+  ["Kafka with Avro and a schema registry: schema compatibility modes",SK+"#schema-registry","ssrc"],
+  ["Stateless vs stateful streaming",SF+"#stateless-stateful","sfun"],
+  ["Window types: tumbling, sliding and session windows",SS+"#windows","sstate"],
+  ["Replaying and reprocessing a stream (checkpoints, offsets, full refresh)",SO+"#replay","sops"]]},
  {id:"delta",name:"Delta Lake & Databricks",items:[
   ["OPTIMIZE vs ZORDER"],
   ["How to handle deletes in Lakeflow"],
@@ -233,8 +262,8 @@ function stats(){
     const c=g.items.filter((_,i)=>done[g.id+i]).length;
     return `<div class="sb">${g.name} · ${c}/${g.items.length}<div class="tr"><i style="width:${c/g.items.length*100}%"></i></div></div>`}).join("");
   document.querySelectorAll(".mod").forEach(m=>{
-    const k=m.dataset.mod,items=GROUPS[0].items.map((it,i)=>[it,i]).filter(([it])=>it[2]===k);
-    const c=items.filter(([_,i])=>done["spark"+i]).length;
+    const g=GROUPS.find(x=>x.id===(m.dataset.g||"spark")),k=m.dataset.mod,items=g.items.map((it,i)=>[it,i]).filter(([it])=>it[2]===k);
+    const c=items.filter(([_,i])=>done[g.id+i]).length;
     m.querySelector(".mc").textContent=`${c}/${items.length} topics`;
     m.querySelector(".bar i").style.width=(c/items.length*100)+"%";
   });
