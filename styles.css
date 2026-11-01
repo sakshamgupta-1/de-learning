@@ -275,3 +275,8 @@ svg .dotA{fill:var(--accent)}
 .pd-rg.read{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
 .pd-rg.skip{background:var(--sunk);color:var(--muted);text-decoration:line-through}
 @media (prefers-reduced-motion:reduce){.pd-folder{transition:none}}
+
+/* section headings that link to a path page */
+h2 a.h-link{color:inherit;text-decoration:none}
+h2 a.h-link span{color:var(--accent);font-size:.85em}
+h2 a.h-link:hover{text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:4px}

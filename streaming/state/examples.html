@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>State, Windows and Watermarks: Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html" aria-current="page">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">State, windows &amp; watermarks</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 2 of 4 · Examples</p>
+  <h1>Windows, joins and dedup in code</h1>
+  <p class="lede">Runnable PySpark for each stateful pattern, and a calculator for the question interviewers like to follow up with: how much state will this join hold?</p>
+  <div class="toc">
+    <a href="#windowed">Windowed counts</a><a href="#sessions">Sessions</a><a href="#ss-join">Stream-stream join</a><a href="#join-state">Join state calculator</a><a href="#dedup">Dedup</a><a href="#late-capture">Keeping late data</a>
+  </div>
+
+  <section id="windowed">
+    <h2>Windowed counts with a watermark</h2>
+<pre><code>from pyspark.sql import functions as F
+
+orders = spark.readStream.table("bronze.orders")            <span class="muted"># has order_ts (event time)</span>
+
+per_10m = (orders
+    .withWatermark("order_ts", "15 minutes")                 <span class="muted"># accept up to 15 min late</span>
+    .groupBy(F.window("order_ts", "10 minutes"), "store_id")
+    .agg(F.count("*").alias("orders"), F.sum("amount").alias("revenue"))
+    .select(F.col("window.start").alias("window_start"),
+            F.col("window.end").alias("window_end"), "store_id", "orders", "revenue"))
+
+(per_10m.writeStream.outputMode("append")                     <span class="muted"># each window written once, when final</span>
+        .option("checkpointLocation", "/chk/gold_orders_10m")
+        .toTable("gold.orders_10m"))</code></pre>
+    <ul>
+      <li>Rows for a window appear about <b>10 + 15 minutes</b> after the window starts: its length plus the watermark delay.</li>
+      <li>Sliding version: <code>F.window("order_ts", "10 minutes", "5 minutes")</code>. Each order is then counted in two windows.</li>
+      <li>Need results sooner? Use <code>outputMode("update")</code> with a MERGE sink: partial counts are visible every batch and corrected as late data arrives.</li>
+    </ul>
+  </section>
+
+  <section id="sessions">
+    <h2>Session windows</h2>
+<pre><code>sessions = (clicks
+    .withWatermark("click_ts", "30 minutes")
+    .groupBy(F.session_window("click_ts", "20 minutes"), "user_id")   <span class="muted"># 20 min of inactivity ends a session</span>
+    .agg(F.count("*").alias("clicks"),
+         F.min("click_ts").alias("first_click"), F.max("click_ts").alias("last_click")))</code></pre>
+    <p>The gap can also be an expression, for example a shorter gap for mobile than desktop: <code>F.session_window("click_ts", F.when(F.col("device") == "mobile", "5 minutes").otherwise("20 minutes"))</code>.</p>
+  </section>
+
+  <section id="ss-join">
+    <h2>Stream-stream join with a time bound</h2>
+<pre><code>imps = (spark.readStream.table("bronze.impressions")
+             .select(F.col("ad_id").alias("imp_ad_id"), "imp_ts", "campaign")
+             .withWatermark("imp_ts", "2 hours"))
+clicks = (spark.readStream.table("bronze.clicks")
+               .select(F.col("ad_id").alias("click_ad_id"), "click_ts")
+               .withWatermark("click_ts", "3 hours"))
+
+attributed = imps.join(clicks, F.expr("""
+    click_ad_id = imp_ad_id AND
+    click_ts BETWEEN imp_ts AND imp_ts + INTERVAL 1 HOUR"""), "leftOuter")</code></pre>
+    <p>Impressions with no click within an hour come out with null click columns, but only after the click watermark passes <code>imp_ts + 1 hour</code>.</p>
+  </section>
+
+  <section id="join-state">
+    <h2>How much state does the join hold?</h2>
+    <p>Each side is kept until the other side's watermark says no match can still arrive. Roughly: impressions stay for the <b>click delay + time bound</b>; clicks stay for the <b>impression delay</b>. Assuming event time tracks arrival time:</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="jA">Impressions per second<input id="jA" type="number" min="0" value="2000"></label>
+        <label for="jB">Clicks per second<input id="jB" type="number" min="0" value="50"></label>
+        <label for="jDa">Impression watermark (min)<input id="jDa" type="number" min="0" value="120"></label>
+        <label for="jDb">Click watermark (min)<input id="jDb" type="number" min="0" value="180"></label>
+        <label for="jT">Time bound (min)<input id="jT" type="number" min="0" value="60"></label>
+        <label for="jR">Bytes per row in state<input id="jR" type="number" min="1" value="200"></label>
+        <label for="jP">State partitions<input id="jP" type="number" min="1" value="200"></label>
+      </div>
+      <div class="out" id="jOut" aria-live="polite"></div>
+      <p class="small muted" style="margin-bottom:0">An estimate, not a measurement: real state also holds keys, indexes and overhead, and late or bursty data changes it. Check <code>numRowsTotal</code> and <code>memoryUsedBytes</code> in the progress metrics.</p>
+    </div>
+    <p>Two levers dominate: the <b>watermark delays</b> and the <b>time bound</b>. Halving the click delay here halves the impression state, which is most of the total.</p>
+  </section>
+
+  <section id="dedup">
+    <h2>Deduplication</h2>
+<pre><code><span class="muted"># duplicates carry the same event time (replayed messages): include it in the key</span>
+dedup = (events.withWatermark("event_ts", "1 hour")
+               .dropDuplicates(["event_id", "event_ts"]))
+
+<span class="muted"># retries may carry different timestamps (Spark 3.5+)</span>
+dedup = (events.withWatermark("event_ts", "1 hour")
+               .dropDuplicatesWithinWatermark(["event_id"]))</code></pre>
+    <p>Duplicates further apart than the watermark delay aren't caught. If you need a guarantee across all time, MERGE into a target keyed on <code>event_id</code> instead (<a href="../sources-sinks/examples.html#merge">pattern</a>).</p>
+  </section>
+
+  <section id="late-capture">
+    <h2>Keeping data the watermark drops</h2>
+    <p>Spark doesn't output dropped late rows. If they matter, keep the raw stream: write Bronze without a watermark, build the windowed aggregate from it, and periodically reconcile Bronze against the aggregate (or recompute affected windows in batch). The progress metric <code>numRowsDroppedByWatermark</code> tells you when it's worth doing.</p>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const f=n=>n>=1e9?(n/1e9).toFixed(1)+" B":n>=1e6?(n/1e6).toFixed(1)+" M":n>=1e3?(n/1e3).toFixed(1)+" K":Math.round(n)+"";
+const gb=b=>b>=1024**3?(b/1024**3).toFixed(1)+" GB":(b/1024**2).toFixed(0)+" MB";
+function calc(){const v=id=>Math.max(0,+$(id).value||0);
+  const a=v("jA"),b=v("jB"),da=v("jDa"),db=v("jDb"),t=v("jT"),r=Math.max(1,v("jR")),p=Math.max(1,v("jP"));
+  const ra=a*(db+t)*60,rb=b*da*60,tot=(ra+rb)*r;
+  $("jOut").innerHTML=[[f(ra),"impression rows in state"],[f(rb),"click rows in state"],[gb(tot),"total state (approx.)"],[gb(tot/p),"per state partition"]].map(([x,l])=>`<div><b>${x}</b><span>${l}</span></div>`).join("")}
+["jA","jB","jDa","jDb","jT","jR","jP"].forEach(id=>$(id).addEventListener("input",calc));calc();
+})();
+</script>
+</body></html>

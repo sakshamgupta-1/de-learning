@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Structured Streaming Fundamentals: Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html" aria-current="page">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Streaming fundamentals</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 1 of 4 · Examples</p>
+  <h1>Runnable patterns</h1>
+  <p class="lede">One query under three triggers, output modes in code, idempotent <code>foreachBatch</code> writes, stream-static joins, and how to watch a running query. Code is PySpark; paths and table names are examples.</p>
+  <div class="toc">
+    <a href="#triggers">Triggers over time</a><a href="#trigger-code">Trigger code</a><a href="#modes">Output modes in code</a><a href="#idempotent">Idempotent foreachBatch</a><a href="#stream-static">Stream-static join</a><a href="#watch">Watching a query</a>
+  </div>
+
+  <section id="triggers">
+    <h2>Three triggers, ten minutes</h2>
+    <p>Data arrives steadily. Press Play to see when each trigger runs batches and how long the cluster is up. The point to notice: <code>availableNow</code> on a schedule trades latency for a cluster that's off most of the time.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 300" role="img" aria-labelledby="trT">
+  <title id="trT">Timeline of micro-batches over ten minutes for the default trigger, a two-minute processing-time trigger, and availableNow scheduled every five minutes</title>
+  <text class="tb" x="20" y="62">Default</text><text class="ts" x="20" y="80">back to back</text>
+  <text class="tb" x="20" y="142">processingTime</text><text class="ts" x="20" y="160">every 2 min</text>
+  <text class="tb" x="20" y="222">availableNow</text><text class="ts" x="20" y="240">run every 5 min</text>
+  <g id="trLanes"></g><g id="trBatches"></g><g id="trAxis"></g>
+  <line id="trCursor" class="lna" x1="150" y1="36" x2="150" y2="262"/>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="sim-ctrl">
+    <button class="btn" id="trPlay">Play</button>
+    <button class="btn ghost" id="trReset">Reset</button>
+    <span class="small">Orange: a micro-batch · grey band: cluster running · blue: cluster start-up. Timing is illustrative, not a benchmark.</span>
+  </div>
+  <div class="out" aria-live="polite" id="trOut"></div>
+
+  <section id="trigger-code">
+    <h2>The same query, three triggers</h2>
+<pre><code>q = (spark.readStream.table("bronze.orders")
+          .where("status IS NOT NULL")
+          .writeStream
+          .option("checkpointLocation", "/chk/silver_orders"))
+
+q.trigger(processingTime="2 minutes").toTable("silver.orders")   <span class="muted"># always on, a batch every 2 min</span>
+q.trigger(availableNow=True).toTable("silver.orders")            <span class="muted"># run from a scheduled job; stops when caught up</span>
+q.toTable("silver.orders")                                        <span class="muted"># default: next batch as soon as the last ends</span></code></pre>
+    <p>Pick one per run; they can share the checkpoint across runs because it tracks data positions, not the trigger. With <code>availableNow</code>, wait for the query to finish before the job ends: <code>query.awaitTermination()</code>.</p>
+  </section>
+
+  <section id="modes">
+    <h2>Output modes in code</h2>
+<pre><code>counts = events.groupBy("customer_id").count()
+
+<span class="muted"># complete: whole table every batch, fine for small results</span>
+counts.writeStream.outputMode("complete").format("delta") \
+      .option("checkpointLocation", "/chk/c1").toTable("gold.counts_full")
+
+<span class="muted"># update: changed keys only; the Delta sink doesn't upsert, so MERGE in foreachBatch</span>
+def upsert(batch, batch_id):
+    (DeltaTable.forName(spark, "gold.counts").alias("t")
+        .merge(batch.alias("s"), "t.customer_id = s.customer_id")
+        .whenMatchedUpdateAll().whenNotMatchedInsertAll().execute())
+
+counts.writeStream.outputMode("update").foreachBatch(upsert) \
+      .option("checkpointLocation", "/chk/c2").start()
+
+<span class="muted"># append: needs a watermark and a window, so each window is written once it's final (Module 2)</span>
+(events.withWatermark("event_ts", "10 minutes")
+       .groupBy(F.window("event_ts", "5 minutes"), "customer_id").count()
+       .writeStream.outputMode("append").format("delta")
+       .option("checkpointLocation", "/chk/c3").toTable("gold.counts_5m"))</code></pre>
+  </section>
+
+  <section id="idempotent">
+    <h2>Idempotent <code>foreachBatch</code></h2>
+    <p>A replayed batch arrives with the same <code>batch_id</code>. Use it, so writing it twice changes nothing.</p>
+<pre><code>APP_ID = "silver_orders_writer"            <span class="muted"># stable per query; don't reuse across queries</span>
+
+def write_two_tables(batch, batch_id):
+    batch.persist()                          <span class="muted"># two writes from one batch (classic compute only)</span>
+    try:
+        (batch.where("region = 'EU'").write.format("delta")
+              .option("txnAppId", APP_ID).option("txnVersion", batch_id)
+              .mode("append").saveAsTable("silver.orders_eu"))
+        (batch.where("region = 'US'").write.format("delta")
+              .option("txnAppId", APP_ID).option("txnVersion", batch_id)
+              .mode("append").saveAsTable("silver.orders_us"))
+    finally:
+        batch.unpersist()</code></pre>
+    <ul>
+      <li>Delta skips a write when that table has already committed this <code>txnAppId</code> at this or a later <code>txnVersion</code>.</li>
+      <li>On Databricks serverless, <code>persist()</code> isn't available: drop it and accept two scans of the batch, or write once and split downstream.</li>
+      <li>For upserts, deduplicate the batch by key before MERGE (<a href="../sources-sinks/examples.html#merge">full pattern</a>).</li>
+    </ul>
+  </section>
+
+  <section id="stream-static">
+    <h2>Stream-static join (stateless)</h2>
+<pre><code>customers = spark.read.table("silver.customers")      <span class="muted"># static side: a Delta table</span>
+enriched = (spark.readStream.table("bronze.orders")
+                 .join(customers, "customer_id", "left"))</code></pre>
+    <p>Each micro-batch joins its new orders to the customers table as it is at that batch: a Delta static side is re-read at its latest version every batch, so updates to customers show up without restarting. Nothing is kept in state. Orders that arrived before a customer change aren't re-joined; if that matters, it's a stream-stream join or a later reconciliation (<a href="../state/index.html#joins">Module 2</a>).</p>
+  </section>
+
+  <section id="watch">
+    <h2>Watching a running query</h2>
+<pre><code>q = df.writeStream.option("checkpointLocation", chk).toTable("silver.orders")
+
+q.id, q.runId          <span class="muted"># id is stable across restarts; runId changes each start</span>
+q.status               <span class="muted"># {'message': 'Waiting for data to arrive', 'isDataAvailable': False, …}</span>
+q.lastProgress         <span class="muted"># metrics for the last batch, as a dict</span>
+q.recentProgress       <span class="muted"># the last few progress reports</span>
+q.exception()          <span class="muted"># the error if the query stopped with one</span>
+spark.streams.active   <span class="muted"># all running queries in this session</span></code></pre>
+    <p>What each progress field means, and a listener that ships them to monitoring: <a href="../operations/examples.html#progress">Module 4 examples</a>.</p>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg";
+function el(tag,a,p,txt){const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;p.appendChild(e);return e}
+const X0=150,W=680,T=10,S=W/T,LANES=[48,128,208],LH=40;
+/* each lane: list of {s,d,k} in minutes; k: b=batch, u=start-up; cluster: [start,end] spans */
+const D=[[],[],[]];
+for(let t=0;t<T-0.01;t+=0.5)D[0].push({s:t,d:0.45,k:"b"});
+for(let t=0;t<T;t+=2)D[1].push({s:t,d:0.7,k:"b"});
+[0,5].forEach(t0=>{D[2].push({s:t0,d:0.6,k:"u"});[0,1,2].forEach(j=>D[2].push({s:t0+0.6+j*0.55,d:0.5,k:"b"}))});
+const CL=[[[0,10]],[[0,10]],[[0,2.25],[5,7.25]]];
+const lat=["≈ 0.5–1 min","≈ 1–3 min","≈ 1–6 min"];
+LANES.forEach((y,i)=>{el("rect",{class:"bx",x:X0,y:y,width:W,height:LH,rx:4},$("trLanes"));
+  CL[i].forEach(([a,b])=>el("rect",{class:"bx2",x:X0+a*S,y:y+4,width:(b-a)*S,height:LH-8,rx:3},$("trLanes")))});
+for(let t=0;t<=T;t+=1)el("text",{class:"tm",x:X0+t*S,y:282,"text-anchor":"middle"},$("trAxis"),t+" min");
+D.forEach((lane,i)=>lane.forEach(b=>{b.r=el("rect",{class:b.k==="u"?"bxb":"bxa",x:X0+b.s*S+1,y:LANES[i]+9,width:0,height:LH-18,rx:2},$("trBatches"))}));
+let t=0,play=false,last=0,raf=0;const reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+function render(){
+  D.forEach(lane=>lane.forEach(b=>b.r.setAttribute("width",Math.max(0,Math.min(t-b.s,b.d)*S-2))));
+  $("trCursor").setAttribute("x1",X0+t*S);$("trCursor").setAttribute("x2",X0+t*S);
+  const names=["Default","processingTime","availableNow"];
+  $("trOut").innerHTML=names.map((n,i)=>{const nb=D[i].filter(b=>b.k==="b"&&t>=b.s+b.d).length;
+    const up=CL[i].reduce((a,[s,e])=>a+Math.max(0,Math.min(t,e)-s),0);
+    return `<div><b>${nb} · ${up.toFixed(1)} min</b><span>${n}: batches · cluster up. Freshness ${lat[i]}</span></div>`}).join("");
+}
+function frame(ts){if(!play)return;t=Math.min(T,t+(ts-last)/1000*0.8);last=ts;render();if(t>=T){play=false;$("trPlay").textContent="Replay";return}raf=requestAnimationFrame(frame)}
+$("trPlay").addEventListener("click",()=>{if(play){play=false;cancelAnimationFrame(raf);$("trPlay").textContent="Play";return}
+  if(t>=T)t=0;if(reduce){t=T;render();$("trPlay").textContent="Replay";return}
+  play=true;$("trPlay").textContent="Pause";last=performance.now();raf=requestAnimationFrame(frame)});
+$("trReset").addEventListener("click",()=>{play=false;cancelAnimationFrame(raf);t=0;render();$("trPlay").textContent="Play"});
+render();
+})();
+</script>
+</body></html>

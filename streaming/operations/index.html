@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Operating Streaming Pipelines</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html" aria-current="page">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><span aria-current="page">Operating streams</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 4 of 4 · Overview</p>
+  <h1>Keeping streams fast, visible and recoverable</h1>
+  <p class="lede">A stream is a long-running system: it has to keep up with its input, tell you when it doesn't, and survive code changes and bad data. This module covers performance bottlenecks, what to monitor, and how to replay or reprocess safely. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#bottlenecks">Keeping up</a><a href="#monitoring">Monitoring</a><a href="#replay">Replay and reprocessing</a><a href="#cost">Cost</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="bottlenecks">
+    <h2>Keeping up: input rate vs processing rate</h2>
+    <p>A stream is healthy when it processes data at least as fast as it arrives, with headroom for bursts and catch-up after failures. Two numbers from every batch tell you: <b>input rate</b> (rows per second arriving) and <b>processing rate</b> (rows per second processed). If processing is below input for long, the backlog grows, batches get bigger and slower, and latency climbs.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Bottleneck</th><th>Signal</th><th>Usual fix</th></tr></thead>
+      <tbody>
+        <tr><td><b>Too little parallelism</b></td><td>Few tasks per batch; idle cores</td><td>More Kafka partitions or <code>minPartitions</code>; repartition after reading</td></tr>
+        <tr><td><b>Skewed partitions</b></td><td>One task per batch much longer than the rest</td><td>Better Kafka keys; repartition; salting (<a href="../../spark/tuning/production.html#s-skew">skew</a>)</td></tr>
+        <tr><td><b>State</b></td><td>State rows and commit time growing</td><td>Watermarks, RocksDB, changelog checkpointing (<a href="../state/production.html">Module 2</a>)</td></tr>
+        <tr><td><b>Sink</b></td><td>Most of the batch in <code>addBatch</code>; slow MERGE</td><td>Prune the MERGE target, optimized writes, fewer and larger batches</td></tr>
+        <tr><td><b>Discovery and planning</b></td><td>Time spent before tasks start (<code>latestOffset</code>, <code>queryPlanning</code>)</td><td>File notifications; simpler plans; fewer tiny batches</td></tr>
+        <tr><td><b>Batch overhead</b></td><td>Very frequent tiny batches; small files</td><td>Longer trigger interval, <code>minOffsetsPerTrigger</code>, compaction</td></tr>
+        <tr><td><b>Shuffle partitions</b></td><td>200 tiny tasks per batch for small data, or spill for large</td><td>Size before the first run (fixed for stateful queries)</td></tr>
+      </tbody></table></div>
+    <p class="small muted">Work the numbers for your own stream: <a href="examples.html#backlog">throughput and backlog calculator</a>.</p>
+  </section>
+
+  <section id="monitoring">
+    <h2>What to monitor</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Metric</th><th>From</th><th>Alert when</th></tr></thead>
+      <tbody>
+        <tr><td><b>Freshness</b>: now − last successful batch</td><td>Progress timestamp, table history</td><td>Above an SLA, e.g. 3 × trigger interval</td></tr>
+        <tr><td><b>Lag</b>: offsets or files behind latest, or minutes behind</td><td><code>sources[].metrics</code> (Kafka offsets behind latest), Auto Loader backlog metrics</td><td>Growing for N batches in a row</td></tr>
+        <tr><td><b>Batch duration vs trigger interval</b></td><td><code>durationMs.triggerExecution</code></td><td>Consistently above the interval</td></tr>
+        <tr><td><b>Processing rate vs input rate</b></td><td><code>processedRowsPerSecond</code>, <code>inputRowsPerSecond</code></td><td>Processing below input for a sustained period</td></tr>
+        <tr><td><b>State size</b></td><td><code>stateOperators[].numRowsTotal</code>, <code>memoryUsedBytes</code></td><td>Growing faster than input</td></tr>
+        <tr><td><b>Late rows dropped</b></td><td><code>stateOperators[].numRowsDroppedByWatermark</code></td><td>Non-zero beyond a tolerance</td></tr>
+        <tr><td><b>Query failures</b></td><td>Listener <code>onQueryTerminated</code>, job status</td><td>Any, with the exception</td></tr>
+      </tbody></table></div>
+    <p>Collect these with a <code>StreamingQueryListener</code> (Python since Spark 3.4) that ships every progress event to your metrics system. Example: <a href="examples.html#listener">listener code</a>.</p>
+  </section>
+
+  <section id="replay">
+    <h2>Replay and reprocessing: a decision path</h2>
+    <p>Most "can I just restart it?" questions come down to whether the checkpoint is still valid for the new code. Answer the questions in order; a "yes" gives the playbook.</p>
+    <div class="calc" style="margin-bottom:0">
+      <div aria-live="polite" id="rpNote"></div>
+      <div class="ctrl">
+        <button class="btn" id="rpYes">Yes</button>
+        <button class="btn ghost" id="rpNo">No</button>
+        <button class="btn ghost" id="rpReset">Start again</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 470" role="img" aria-labelledby="rpT">
+  <title id="rpT">Decision flow for restarting, replaying or reprocessing a streaming query</title>
+  <defs>
+    <marker id="r1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker>
+    <marker id="r2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker>
+  </defs>
+  <rect class="bx2" x="30" y="10" width="460" height="44" rx="22"/><text class="tb" x="260" y="37" text-anchor="middle">You need to restart, change or rerun a stream</text>
+  <rect class="bx" id="rq0" x="30" y="84" width="460" height="54" rx="8"/><text class="t" x="260" y="116" text-anchor="middle">Is the checkpoint lost, deleted or corrupted?</text>
+  <rect class="bx" id="rq1" x="30" y="168" width="460" height="54" rx="8"/><text class="t" x="260" y="200" text-anchor="middle">Did the source change (topic, path, table)?</text>
+  <rect class="bx" id="rq2" x="30" y="252" width="460" height="54" rx="8"/><text class="t" x="260" y="276" text-anchor="middle">Did stateful logic change (keys, aggregations,</text><text class="t" x="260" y="296" text-anchor="middle">joins, watermarks, dedup)?</text>
+  <rect class="bx" id="rq3" x="30" y="336" width="460" height="54" rx="8"/><text class="t" x="260" y="368" text-anchor="middle">Must output already written be recomputed?</text>
+  <rect class="bxo" id="rq4" x="30" y="414" width="460" height="46" rx="23"/><text class="tb" x="260" y="442" text-anchor="middle">Restart with the same checkpoint</text>
+  <g>
+    <line class="ln" x1="260" y1="54" x2="260" y2="80" marker-end="url(#r1)"/><line class="ln" x1="260" y1="138" x2="260" y2="164" marker-end="url(#r1)"/>
+    <line class="ln" x1="260" y1="222" x2="260" y2="248" marker-end="url(#r1)"/><line class="ln" x1="260" y1="306" x2="260" y2="332" marker-end="url(#r1)"/>
+    <line class="ln" x1="260" y1="390" x2="260" y2="410" marker-end="url(#r1)"/>
+    <text class="ts" x="270" y="156">no</text><text class="ts" x="270" y="240">no</text><text class="ts" x="270" y="324">no</text><text class="ts" x="270" y="404">no</text>
+  </g>
+  <g>
+    <line class="lna" x1="490" y1="111" x2="556" y2="111" marker-end="url(#r2)"/><text class="ts" x="506" y="103">yes</text>
+    <line class="lna" x1="490" y1="195" x2="556" y2="195" marker-end="url(#r2)"/><text class="ts" x="506" y="187">yes</text>
+    <line class="lna" x1="490" y1="279" x2="556" y2="279" marker-end="url(#r2)"/><text class="ts" x="506" y="271">yes</text>
+    <line class="lna" x1="490" y1="363" x2="556" y2="363" marker-end="url(#r2)"/><text class="ts" x="506" y="355">yes</text>
+  </g>
+  <rect class="bxr" id="ro0" x="560" y="84" width="270" height="54" rx="8"/><text class="tb" x="695" y="108" text-anchor="middle">Restart from an explicit</text><text class="tb" x="695" y="127" text-anchor="middle">position, dedupe overlap</text>
+  <rect class="bxa" id="ro1" x="560" y="168" width="270" height="54" rx="8"/><text class="tb" x="695" y="200" text-anchor="middle">New checkpoint, set start</text>
+  <rect class="bxa" id="ro2" x="560" y="252" width="270" height="54" rx="8"/><text class="tb" x="695" y="276" text-anchor="middle">New checkpoint, rebuild</text><text class="tb" x="695" y="295" text-anchor="middle">state from history</text>
+  <rect class="bxb" id="ro3" x="560" y="336" width="270" height="54" rx="8"/><text class="tb" x="695" y="360" text-anchor="middle">Batch-recompute the range,</text><text class="tb" x="695" y="379" text-anchor="middle">keep the stream running</text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="callout trap"><div class="lbl">Common trap</div>Changing <code>startingOffsets</code>, <code>startingVersion</code> or <code>modifiedAfter</code> on an <b>existing</b> checkpoint does nothing: those options apply only when a query starts with a new checkpoint. Reprocessing always means either a new checkpoint or a separate batch job.</div>
+
+  <section id="cost">
+    <h2>Cost</h2>
+    <ul>
+      <li><b>Always-on vs scheduled:</b> a continuously running cluster costs the same at 3 a.m. as at peak. If minutes of latency are acceptable, <code>availableNow</code> on a schedule processes the same data incrementally and shuts down (<a href="../fundamentals/examples.html#triggers">compare triggers</a>).</li>
+      <li><b>Many small streams:</b> run several queries on one cluster (each with its own checkpoint), or a Lakeflow pipeline, instead of a cluster per stream.</li>
+      <li><b>Batch size:</b> tiny frequent batches pay fixed overhead each time and create small files; longer intervals are usually cheaper per row.</li>
+      <li><b>Autoscaling</b> on always-on streams is tricky: classic autoscaling reacts to task backlog within a batch, not to stream lag. Databricks' enhanced autoscaling in Lakeflow pipelines is designed for streaming load.</li>
+    </ul>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Fact</th><th class="num">Value</th></tr></thead>
+      <tbody>
+        <tr><td>Healthy stream</td><td class="num">processing rate ≥ input rate</td></tr>
+        <tr><td>Batch duration vs trigger interval</td><td class="num">comfortably below</td></tr>
+        <tr><td>Starting options (<code>startingOffsets</code>, <code>startingVersion</code>…)</td><td class="num">new checkpoints only</td></tr>
+        <tr><td>Python <code>StreamingQueryListener</code></td><td class="num">Spark 3.4+</td></tr>
+        <tr><td>Query <code>id</code> / <code>runId</code></td><td class="num">stable / new per start</td></tr>
+        <tr><td>Lakeflow full refresh</td><td class="num">clears tables and checkpoints</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Bottlenecks</div>"I compare input rate with processing rate and batch duration with the trigger interval. If it's falling behind, the progress metrics show where the batch spends its time: planning and discovery, the processing stages, state commits, or the sink. Then it's the usual Spark tuning: parallelism, skew, state size, and a sink that prunes."</div>
+    <div class="callout say"><div class="lbl">Monitoring</div>"Every stream gets a listener that ships progress metrics, and alerts on freshness, lag in minutes, processing rate below input rate, state growth and dropped late rows, plus query failures. Job status alone misses a stream that's running but falling behind."</div>
+    <div class="callout say"><div class="lbl">Reprocessing</div>"First I ask whether the checkpoint is still valid. Stateless changes restart on the same checkpoint. Source or stateful changes need a new checkpoint with an explicit starting point and a state rebuild. To fix output already written, I recompute the affected range in batch with replaceWhere or MERGE and leave the stream running."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Batch duration is 4 minutes with a 1-minute trigger. What's happening, and what do you check first?</summary><div>The stream is falling behind: each batch picks up more data than the last. Check the duration breakdown in the progress metrics to see where time goes, then processing rate vs input rate, task count and skew in the Spark UI, and state and sink time.</div></details>
+      <details><summary>You fixed a bug in a filter. Can you restart on the same checkpoint?</summary><div>Yes: filters and projections are stateless changes. But only new data gets the fix; output already written stays wrong until you recompute that range separately.</div></details>
+      <details><summary>You changed a <code>groupBy</code> key. What now?</summary><div>The state's schema no longer matches, so you need a new checkpoint. Rebuild state by reprocessing enough history (from Bronze or the source's retention), then switch the target over or overwrite the affected range.</div></details>
+      <details><summary>What does a full refresh of a Lakeflow streaming table do?</summary><div>It clears the table's data and its checkpoints and reprocesses everything still available in the source. It's convenient, but it only works if the source still has all the history (Kafka retention, for example, may not).</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="examples.html"><span class="n">Examples</span><b>Measure, watch, replay</b><p>A throughput and backlog calculator, an annotated progress report, a metrics listener, and code for each replay path.</p></a>
+      <a class="mod" href="production.html"><span class="n">Production issues</span><b>Running streams at scale</b><p>Falling behind, small files, hot Kafka partitions, duplicates after reprocessing, too many streams on one cluster, and runaway cost.</p></a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../sources-sinks/index.html"><span>Previous · Module 3</span><b>Sources &amp; sinks</b></a>
+    <a href="../../index.html"><span>Done with Structured Streaming</span><b>Back to the hub</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const Q=[
+ {q:"Is the checkpoint lost, deleted or corrupted?",hint:"Check the checkpoint path still has offsets/ and commits/ with recent batch ids, and that no one else writes to it.",
+  out:"<b>Restart from an explicit position.</b> Find the last batch written to the target (table history, max ingestion time or source offset stored in the data). Start a new checkpoint with <code>startingOffsets</code> JSON (Kafka), <code>startingVersion</code> (Delta) or <code>modifiedAfter</code> (Auto Loader) at that point, a little earlier to be safe, and make the first batches idempotent (MERGE or dedupe) to absorb the overlap."},
+ {q:"Did the source change (a different topic, path or table, or a new set of topics)?",hint:"Adding or removing sources or topics, or pointing at a different path, invalidates the stored offsets.",
+  out:"<b>New checkpoint, explicit start.</b> Start the new query with its own checkpoint and a starting position for the new source. If it replaces an old source, decide the cut-over point so nothing is missed or written twice."},
+ {q:"Did the stateful logic change (grouping keys, aggregations, join type or condition, watermark, dedup keys, number of stateful operators)?",hint:"Stateless changes, such as filters, projections or new derived columns, don't count.",
+  out:"<b>New checkpoint, rebuild state.</b> The old state can't be read by the new query. Run the new query from enough history to rebuild state (Bronze, Delta versions, or Kafka within retention) into a new table or alongside the old one, then switch readers over. In Lakeflow, a full refresh of the table does this if the source still has the history."},
+ {q:"Must output that was already written be recomputed (for example a logic bug that's now fixed)?",hint:"Restarting only fixes new data; rows already written stay as they were.",
+  out:"<b>Batch-recompute the affected range.</b> Keep the stream running on its checkpoint with the fixed code. Separately, run a batch job over the affected range from Bronze and overwrite it in the target with <code>replaceWhere</code> (for a date range) or a MERGE keyed on the business key."}
+];
+let i=0,hit=null;
+function mark(id){if(hit)$(hit).classList.remove("hit");hit=id;if(id)$(id).classList.add("hit")}
+function render(ans){
+  if(ans==="yes"){mark("ro"+i);$("rpNote").innerHTML=`<p style="margin:0">${Q[i].out}</p>`;$("rpYes").disabled=$("rpNo").disabled=true;return}
+  if(i>=Q.length){mark("rq4");$("rpNote").innerHTML=`<p style="margin:0"><b>Restart with the same checkpoint.</b> The change is stateless (or there's no change): the query resumes exactly where it stopped, with the new code applied to new data.</p>`;$("rpYes").disabled=$("rpNo").disabled=true;return}
+  mark("rq"+i);
+  $("rpNote").innerHTML=`<p class="small muted" style="margin:0 0 .3rem">Question ${i+1} of ${Q.length}</p><p style="margin:0 0 .3rem"><b>${Q[i].q}</b></p><p class="small" style="margin:0">${Q[i].hint}</p>`;
+  $("rpYes").disabled=$("rpNo").disabled=false}
+$("rpYes").addEventListener("click",()=>render("yes"));
+$("rpNo").addEventListener("click",()=>{i++;render()});
+$("rpReset").addEventListener("click",()=>{i=0;render()});
+render();
+})();
+</script>
+<script>
+(function(){
+  const KEY="de-learning-done-v2",items=[[2, "Common performance bottlenecks in Structured Streaming"], [13, "Replaying and reprocessing a stream (checkpoints, offsets, full refresh)"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="stream"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Structured Streaming Path</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../index.html">Hub</a>
+    <a href="fundamentals/index.html">1 · Fundamentals</a>
+    <a href="state/index.html">2 · State &amp; time</a>
+    <a href="sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Hub</a><span class="sep">›</span><span aria-current="page">Structured Streaming</span></nav>
+  <p class="eyebrow">Learning path</p>
+  <h1>Structured Streaming</h1>
+  <p class="lede">Four modules, in order. They build on <a href="../spark/index.html">Spark Core</a>: every micro-batch is an ordinary Spark job, so the streaming-specific parts are when batches run, what they remember, and how they recover. Each module starts with a short overview; deeper pages hang off it.</p>
+
+  <div class="paths" style="margin-top:1.5rem">
+    <a class="mod" href="fundamentals/index.html">
+      <span class="n">Module 1</span><b>Streaming fundamentals</b>
+      <p>The micro-batch loop, triggers, output modes, stateless vs stateful, checkpoints and exactly-once. Crash-and-replay stepper, trigger timeline.</p>
+      <div class="ft"><span>Overview · Deep dive · Examples · Production</span></div>
+    </a>
+    <a class="mod" href="state/index.html">
+      <span class="n">Module 2</span><b>State, windows &amp; watermarks</b>
+      <p>Event time, window types, watermarks and late data, the state store and RocksDB, stream-stream joins, deduplication. Watermark stepper, join state calculator.</p>
+      <div class="ft"><span>Overview · Deep dive · Examples · Production</span></div>
+    </a>
+    <a class="mod" href="sources-sinks/index.html">
+      <span class="n">Module 3</span><b>Sources &amp; sinks</b>
+      <p>Auto Loader discovery and schema evolution, Kafka offsets and delivery, Avro with a schema registry, sinks, and foreachBatch with MERGE. Schema compatibility checker.</p>
+      <div class="ft"><span>Overview · Deep dive · Examples · Production</span></div>
+    </a>
+    <a class="mod" href="operations/index.html">
+      <span class="n">Module 4</span><b>Operating streams</b>
+      <p>Performance bottlenecks, monitoring, replay and reprocessing, cost. Replay decision path, throughput and backlog calculator.</p>
+      <div class="ft"><span>Overview · Examples · Production</span></div>
+    </a>
+  </div>
+
+  <nav class="next">
+    <a href="../index.html"><span>Back</span><b>Hub</b></a>
+    <a href="fundamentals/index.html"><span>Start</span><b>Module 1 · Streaming fundamentals</b></a>
+  </nav>
+</div></main>
+</body></html>

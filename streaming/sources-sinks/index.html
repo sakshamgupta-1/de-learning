@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Streaming Sources and Sinks</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html" aria-current="page">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><span aria-current="page">Sources &amp; sinks</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 3 of 4 · Overview</p>
+  <h1>Getting data in, and out exactly once</h1>
+  <p class="lede">Most production streams read files with Auto Loader or events from Kafka, and write to Delta, often through <code>foreachBatch</code> and MERGE. Each has its own way of tracking progress, handling schema change and staying exactly-once. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#autoloader">Auto Loader</a><a href="#kafka">Kafka source</a><a href="#schema-registry">Avro and schema registry</a><a href="#sinks">Sinks</a><a href="#foreachbatch">foreachBatch + MERGE</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="autoloader">
+    <h2>Auto Loader: files in cloud storage</h2>
+    <p>Auto Loader (<code>format("cloudFiles")</code>, Databricks) incrementally ingests new files from a folder. It records every file it has discovered in a RocksDB store inside the checkpoint, so each file is processed exactly once, even across restarts. The main design choice is <b>how it discovers new files</b>:</p>
+    <div class="seg" role="tablist" aria-label="Discovery mode" id="alTabs">
+      <button role="tab" aria-selected="true" data-k="list">Directory listing</button>
+      <button role="tab" aria-selected="false" data-k="notif">File notification</button>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 222" role="img" aria-labelledby="alT">
+  <title id="alT">Auto Loader discovering new files either by listing the storage folder or by reading storage events from a queue</title>
+  <defs><marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="aha" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect class="bx" x="20" y="30" width="250" height="172" rx="8"/><text class="tb" x="36" y="54">Storage folder</text>
+  <g id="alFiles"></g>
+  <rect class="bx" id="alQ" x="315" y="80" width="220" height="60" rx="8"/><text class="tb" id="alQt" x="425" y="106" text-anchor="middle"></text><text class="ts" id="alQs" x="425" y="125" text-anchor="middle"></text>
+  <rect class="bxa" x="580" y="70" width="250" height="80" rx="8"/><text class="tb" x="705" y="100" text-anchor="middle">Auto Loader</text><text class="ts" x="705" y="120" text-anchor="middle">RocksDB of files seen, in the checkpoint</text>
+  <line class="lna" id="alL1" x1="270" y1="110" x2="311" y2="110" marker-end="url(#aa)"/>
+  <line class="lna" id="alL2" x1="535" y1="110" x2="576" y2="110" marker-end="url(#aa)"/>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="calc" style="margin-top:0">
+    <div class="fields"><label for="alN">Files already in the folder<input id="alN" type="number" min="0" value="2000000"></label><label for="alNew">New files per batch<input id="alNew" type="number" min="1" value="500"></label></div>
+    <div class="out" id="alOut" aria-live="polite"></div>
+    <p class="note" id="alNote" aria-live="polite"></p>
+  </div>
+  <p>Schema handling: give Auto Loader a <code>cloudFiles.schemaLocation</code> and it infers the schema, stores it, and evolves it. By default (<code>addNewColumns</code>) a new column stops the stream once; the restart picks it up. Values that don't fit the schema go to <code>_rescued_data</code> instead of being lost.</p>
+
+  <section id="kafka">
+    <h2>Kafka source: offsets live in the checkpoint</h2>
+    <ul>
+      <li><b>Parallelism:</b> by default one Spark task per Kafka partition per batch. <code>minPartitions</code> splits large partitions across more tasks.</li>
+      <li><b>Progress:</b> Spark stores the offsets it processed <b>in the checkpoint</b>, not in Kafka. It doesn't commit offsets to a consumer group, so consumer-group lag tools don't show its lag unless you report it yourself; the progress metrics include offsets behind latest.</li>
+      <li><b>Consumer group:</b> generated per query by default. Setting <code>kafka.group.id</code> is mainly for ACLs or quotas; two queries must not share one.</li>
+      <li><b>Start:</b> <code>startingOffsets</code> applies only to a <b>new</b> checkpoint. Its default for streams is <code>latest</code>; use <code>earliest</code> or explicit JSON offsets to backfill.</li>
+      <li><b>Data loss:</b> if retention deletes offsets the stream hasn't read yet, the query fails (<code>failOnDataLoss=true</code>). Setting it to false lets the stream continue, but the data is gone.</li>
+    </ul>
+    <div class="tbl"><table>
+      <thead><tr><th>Delivery</th><th>Into Spark (Kafka source)</th><th>Out of Spark (Kafka sink)</th></tr></thead>
+      <tbody>
+        <tr><td>Guarantee</td><td>Exactly-once processing with the checkpoint</td><td>At-least-once: a replayed batch is written again</td></tr>
+        <tr><td>Make it end-to-end exactly-once by</td><td>An idempotent sink (Delta)</td><td>Idempotent consumers: a key to dedupe on</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="schema-registry">
+    <h2>Kafka with Avro and a schema registry</h2>
+    <p>Producers serialise each message with an Avro schema registered in a <b>schema registry</b>; the message carries the schema id (Confluent wire format: one magic byte plus a 4-byte id, then the Avro bytes). Consumers fetch the schema by id. The registry enforces a <b>compatibility mode</b> per subject, which decides which schema changes are allowed and who must upgrade first. Try a change:</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="crChange">Schema change<select id="crChange">
+          <option value="add_def">Add a field with a default</option>
+          <option value="add_nodef">Add a field without a default</option>
+          <option value="rm_def">Remove a field that has a default</option>
+          <option value="rm_nodef">Remove a field without a default</option>
+          <option value="rename">Rename a field</option>
+          <option value="int_long">Change a field from int to long</option>
+          <option value="str_int">Change a field from string to int</option>
+        </select></label>
+        <label for="crMode">Compatibility mode<select id="crMode">
+          <option value="BACKWARD">BACKWARD (Confluent default)</option>
+          <option value="FORWARD">FORWARD</option>
+          <option value="FULL">FULL</option>
+        </select></label>
+      </div>
+      <div class="out" id="crOut" aria-live="polite"></div>
+      <p class="note" id="crNote" aria-live="polite"></p>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>Mode</th><th>Guarantee</th><th>Upgrade first</th></tr></thead>
+      <tbody>
+        <tr><td><b>BACKWARD</b></td><td>Consumers on the new schema can read data written with the previous one</td><td>Consumers</td></tr>
+        <tr><td><b>FORWARD</b></td><td>Consumers on the previous schema can read data written with the new one</td><td>Producers</td></tr>
+        <tr><td><b>FULL</b></td><td>Both</td><td>Either</td></tr>
+        <tr><td><code>*_TRANSITIVE</code></td><td>Against all earlier versions, not just the previous one</td><td>As above</td></tr>
+      </tbody></table></div>
+    <p>Decoding in Spark: open-source <code>from_avro</code> takes a fixed schema, so you strip the 5-byte header and pass the JSON schema; Databricks' <code>from_avro</code> can look schemas up in the registry directly. Code: <a href="examples.html#avro">examples</a>.</p>
+  </section>
+
+  <section id="sinks">
+    <h2>Sinks</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Sink</th><th>Output modes</th><th>Guarantee</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><b>Delta</b></td><td>append, complete</td><td>Exactly-once</td><td>Records query id and batch id per commit</td></tr>
+        <tr><td><b>File</b> (Parquet, JSON…)</td><td>append</td><td>Exactly-once</td><td>Via the <code>_spark_metadata</code> log, which only Spark readers respect</td></tr>
+        <tr><td><b>Kafka</b></td><td>append, update, complete</td><td>At-least-once</td><td>Needs a <code>value</code> column; <code>key</code> and <code>topic</code> optional</td></tr>
+        <tr><td><b><code>foreachBatch</code></b></td><td>all</td><td>At-least-once unless idempotent</td><td>Any batch writer: MERGE, several tables, JDBC</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="foreachbatch">
+    <h2><code>foreachBatch</code> + MERGE: streaming upserts</h2>
+    <p>The Delta sink can only append or overwrite. To apply updates and deletes (CDC, latest state per key), MERGE each micro-batch into the target:</p>
+<pre><code>from delta.tables import DeltaTable
+from pyspark.sql import Window, functions as F
+
+def upsert(batch, batch_id):
+    latest = (batch.withColumn("rn", F.row_number().over(
+                  Window.partitionBy("customer_id").orderBy(F.desc("updated_at"))))
+                   .where("rn = 1").drop("rn"))                     <span class="muted"># one row per key per batch</span>
+    (DeltaTable.forName(spark, "silver.customers").alias("t")
+        .merge(latest.alias("s"), "t.customer_id = s.customer_id")
+        .whenMatchedUpdateAll(condition="s.updated_at &gt; t.updated_at")  <span class="muted"># ignore stale updates</span>
+        .whenNotMatchedInsertAll()
+        .execute())
+
+(spark.readStream.table("bronze.customers_cdc")
+      .writeStream.foreachBatch(upsert)
+      .option("checkpointLocation", "/chk/silver_customers").start())</code></pre>
+    <ul>
+      <li><b>Deduplicate within the batch first</b>: MERGE fails if several source rows match one target row.</li>
+      <li><b>Order guard</b> (<code>updated_at &gt; t.updated_at</code>) makes replays and out-of-order batches harmless, so the MERGE is idempotent.</li>
+      <li>In Lakeflow pipelines, <code>AUTO CDC</code> (<code>APPLY CHANGES</code>) does this, including SCD Type 2.</li>
+    </ul>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Setting or fact</th><th class="num">Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>cloudFiles.maxFilesPerTrigger</code></td><td class="num">1,000</td></tr>
+        <tr><td><code>cloudFiles.useNotifications</code></td><td class="num">false (listing)</td></tr>
+        <tr><td><code>cloudFiles.schemaEvolutionMode</code></td><td class="num">addNewColumns</td></tr>
+        <tr><td><code>cloudFiles.includeExistingFiles</code></td><td class="num">true</td></tr>
+        <tr><td>Kafka <code>startingOffsets</code> (streaming)</td><td class="num">latest</td></tr>
+        <tr><td>Kafka <code>failOnDataLoss</code></td><td class="num">true</td></tr>
+        <tr><td>Kafka <code>maxOffsetsPerTrigger</code></td><td class="num">none</td></tr>
+        <tr><td>Delta source <code>maxFilesPerTrigger</code></td><td class="num">1,000</td></tr>
+        <tr><td>Confluent schema registry compatibility</td><td class="num">BACKWARD</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Auto Loader</div>"Auto Loader tracks every discovered file in RocksDB inside the checkpoint, so files are ingested exactly once. Directory listing is simple but its cost grows with the folder; for large or busy folders I use file notifications or managed file events, so discovery scales with new files only. I give it a schema location so it infers and evolves the schema, with a rescued-data column for anything that doesn't fit."</div>
+    <div class="callout say"><div class="lbl">Kafka</div>"Spark reads one task per Kafka partition and stores offsets in its checkpoint, not in a consumer group. The source is replayable, so with a Delta sink it's exactly-once end to end. Writing back to Kafka is at-least-once, so downstream consumers need a key to dedupe on."</div>
+    <div class="callout say"><div class="lbl">Schema registry</div>"Messages carry a schema id and the registry enforces compatibility. Under BACKWARD, the default, I can add fields with defaults or remove fields, and consumers upgrade first; under FORWARD producers upgrade first. Renames and type changes are breaking, so they go to a new field or a new topic."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Directory listing has worked for a year, and now discovery takes longer than processing. Why?</summary><div>Listing cost grows with the number of files in the folder, not with the new ones. Switch to file notifications or managed file events, or use a date-partitioned path layout so listing covers less.</div></details>
+      <details><summary>You restart a Kafka stream with <code>startingOffsets="earliest"</code> to reprocess. Nothing is reprocessed. Why?</summary><div><code>startingOffsets</code> only applies to a new checkpoint; with an existing one, the query resumes from its stored offsets. Reprocessing needs a new checkpoint.</div></details>
+      <details><summary>The query fails with "Some data may have been lost because they are not available in Kafka any more". Options?</summary><div>Retention deleted offsets before Spark read them. Restore the data from another copy if possible; otherwise, deliberately accept the gap (<code>failOnDataLoss=false</code> or new offsets) and record it. Prevent it with retention well above the longest expected outage, and alerts on lag.</div></details>
+      <details><summary>Under BACKWARD compatibility, a producer adds a field without a default. What happens?</summary><div>The registry rejects the new schema: consumers on the new schema couldn't read old messages, which lack the field. Add a default.</div></details>
+      <details><summary>Your MERGE in <code>foreachBatch</code> fails with "multiple source rows matched". Fix?</summary><div>The batch has several changes for the same key. Keep only the latest per key (window with <code>row_number</code>) before merging.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html"><span class="n">Deep dive</span><b>How sources track progress</b><p>Auto Loader internals and schema evolution modes, Kafka offsets and rate limits, the Avro wire format and compatibility rules, Delta as a streaming source, and sink guarantees.</p></a>
+      <a class="mod" href="examples.html"><span class="n">Examples</span><b>Ingestion patterns in code</b><p>Auto Loader with schema evolution, Kafka with Avro (open-source and Databricks), a Delta change feed source, and an idempotent MERGE upsert.</p></a>
+      <a class="mod" href="production.html"><span class="n">Production issues</span><b>When ingestion breaks</b><p>Slow file discovery, schema changes stopping the stream, Kafka data loss and lag, MERGE conflicts and duplicates, and upstream updates breaking a Delta source.</p></a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../state/index.html"><span>Previous · Module 2</span><b>State, windows &amp; watermarks</b></a>
+    <a href="../operations/index.html"><span>Next · Module 4</span><b>Operating streams</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg";
+function el(tag,a,p,txt){const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;p.appendChild(e);return e}
+for(let r=0;r<5;r++)for(let c=0;c<9;c++){const nw=r===4&&c>5;el("rect",{class:nw?"bxa":"bx2",x:36+c*25,y:70+r*22,width:18,height:16,rx:2},$("alFiles"))}
+el("text",{class:"ts",x:36,y:192},$("alFiles"),"grey: already ingested · orange: new");
+let mode="list";
+const fmt=n=>n.toLocaleString("en-US",{maximumFractionDigits:0});
+function al(){const n=Math.max(0,+$("alN").value||0),nw=Math.max(1,+$("alNew").value||1);
+  if(mode==="list"){$("alQt").textContent="List the folder";$("alQs").textContent="every file, every batch";$("alQ").setAttribute("class","bxr");
+    $("alOut").innerHTML=`<div><b>${fmt(Math.ceil((n+nw)/1000))}</b><span>list requests per batch (1,000 files per page)</span></div><div><b>${fmt(n+nw)}</b><span>file entries examined to find ${fmt(nw)} new ones</span></div>`;
+    $("alNote").textContent="No setup beyond read access. Cost and discovery time grow with the total number of files in the folder, so it suits small folders, or paths organised by date. (Auto Loader can also list incrementally for lexically ordered file names, a mode now deprecated.)"}
+  else{$("alQt").textContent="Event queue";$("alQs").textContent="SNS + SQS, Event Grid, Pub/Sub";$("alQ").setAttribute("class","bxb");
+    $("alOut").innerHTML=`<div><b>≈ ${fmt(Math.ceil(nw/10))}</b><span>queue reads per batch (messages come in batches)</span></div><div><b>${fmt(nw)}</b><span>file entries examined: the new ones only</span></div>`;
+    $("alNote").textContent="Storage sends an event per new file to a queue that Auto Loader reads, so cost tracks new files only. Needs permissions to create or use the notification resources. On newer Databricks runtimes, managed file events on a Unity Catalog external location do this without per-stream queues. A periodic backfill listing (cloudFiles.backfillInterval) catches any missed events."}}
+document.querySelectorAll("#alTabs button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("#alTabs button").forEach(x=>x.setAttribute("aria-selected",x===b));mode=b.dataset.k;al()}));
+["alN","alNew"].forEach(id=>$(id).addEventListener("input",al));al();
+/* schema compatibility */
+const C={add_def:[1,1,"New readers use the default for old messages; old readers ignore the new field."],
+  add_nodef:[0,1,"A new reader can't fill the field for old messages, which don't have it and have no default to fall back on. Old readers just ignore the extra field."],
+  rm_def:[1,1,"New readers ignore the removed field in old messages; old readers use its default when it's missing from new messages."],
+  rm_nodef:[1,0,"New readers ignore the field in old messages, but old readers expect it in new messages and have no default to use."],
+  rename:[0,0,"Avro matches fields by name, so a rename looks like a removal plus an addition without a default. Reader-side aliases can bridge it, but treat it as breaking: add a new field and deprecate the old one."],
+  int_long:[1,0,"Avro promotes int to long when reading, so a new (long) reader handles old (int) data. An old (int) reader can't read long values."],
+  str_int:[0,0,"No promotion exists between string and int in either direction. Use a new field."]};
+function cr(){const [bw,fw,why]=C[$("crChange").value],m=$("crMode").value,ok=m==="BACKWARD"?bw:m==="FORWARD"?fw:bw&&fw;
+  const first=m==="BACKWARD"?"Consumers first":m==="FORWARD"?"Producers first":"Either order";
+  $("crOut").innerHTML=`<div><b style="color:var(${ok?"--ok":"--bad"})">${ok?"Allowed":"Rejected"}</b><span>by the registry under ${m}</span></div><div><b>${bw?"yes":"no"} / ${fw?"yes":"no"}</b><span>backward / forward compatible</span></div><div><b>${ok?first:"—"}</b><span>who upgrades first</span></div>`;
+  $("crNote").textContent=why}
+["crChange","crMode"].forEach(id=>$(id).addEventListener("change",cr));cr();
+})();
+</script>
+<script>
+(function(){
+  const KEY="de-learning-done-v2",items=[[5, "foreachBatch and MERGE for streaming upserts"], [8, "Auto Loader: directory listing vs file notification"], [9, "Kafka offsets, consumer groups and delivery semantics"], [10, "Kafka with Avro and a schema registry: schema compatibility modes"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="stream"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

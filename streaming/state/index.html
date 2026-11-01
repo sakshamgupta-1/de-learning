@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>State, Windows and Watermarks</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html" aria-current="page">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><span aria-current="page">State, windows &amp; watermarks</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 2 of 4 · Overview</p>
+  <h1>Event time, and when to stop waiting</h1>
+  <p class="lede">Aggregations, deduplication and joins across batches need state. Windows decide how events group in time; the watermark decides how long to wait for late events before a result is final and its state can be dropped. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#event-time">Event time</a><a href="#windows">Window types</a><a href="#watermarks">Watermarks</a><a href="#state-store">State store</a><a href="#joins">Stream-stream joins</a><a href="#dedup">Deduplication</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="event-time">
+    <h2>Event time vs processing time</h2>
+    <p><b>Event time</b> is when something happened, carried in the data (<code>event_ts</code>). <b>Processing time</b> is when Spark sees it. They differ because of network delays, offline devices, retries and backfills, so events arrive <b>out of order</b> and <b>late</b>.</p>
+    <p>Grouping by event time gives correct business answers ("orders between 12:00 and 12:10") however late the data is. The cost is that Spark must keep each window's partial result in <b>state</b> until it decides no more events will come for it. That decision is the <b>watermark</b>.</p>
+  </section>
+
+  <section id="windows">
+    <h2>Window types</h2>
+    <p>The same seven events, grouped three ways. Switch between them to see which window each event lands in.</p>
+    <div class="seg" role="tablist" aria-label="Window type" id="wTabs">
+      <button role="tab" aria-selected="true" data-k="tumbling">Tumbling 10 min</button>
+      <button role="tab" aria-selected="false" data-k="sliding">Sliding 10 min, every 5</button>
+      <button role="tab" aria-selected="false" data-k="session">Session, 5 min gap</button>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 250" role="img" aria-labelledby="wT">
+  <title id="wT">Seven events on an event-time axis from 12:00 to 12:35, grouped into tumbling, sliding or session windows</title>
+  <g id="wWins"></g><g id="wAxis"></g><g id="wEvts"></g>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <p class="note" id="wNote" aria-live="polite"></p>
+  <div class="tbl"><table>
+    <thead><tr><th>Window</th><th>Code</th><th>Each event is in</th><th>Use for</th></tr></thead>
+    <tbody>
+      <tr><td><b>Tumbling</b></td><td><code>F.window("ts", "10 minutes")</code></td><td>Exactly one window</td><td>Per-interval totals: orders per 10 minutes</td></tr>
+      <tr><td><b>Sliding</b></td><td><code>F.window("ts", "10 minutes", "5 minutes")</code></td><td>length ÷ slide windows (here 2)</td><td>Moving averages, "last 10 minutes, updated every 5"</td></tr>
+      <tr><td><b>Session</b></td><td><code>F.session_window("ts", "5 minutes")</code> (Spark 3.2+)</td><td>One session, whose length depends on the data</td><td>User sessions: activity until a gap of inactivity</td></tr>
+    </tbody></table></div>
+
+  <section id="watermarks">
+    <h2>Watermarks and late data</h2>
+    <p><code>withWatermark("event_ts", "10 minutes")</code> sets the watermark to <b>the latest event time seen, minus 10 minutes</b>. Events older than the watermark may be dropped; a window whose end is at or before the watermark is final, so append mode writes it and its state is deleted. Step through six micro-batches of a 10-minute tumbling count.</p>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 262" role="img" aria-labelledby="wmT">
+  <title id="wmT">Event-time axis with four 10-minute windows; events are added batch by batch, the watermark line moves right, closed windows are emitted and late events are dropped</title>
+  <g id="wmWins"></g><g id="wmAxis"></g><g id="wmEvts"></g>
+  <line id="wmMax" class="lnb" x1="0" y1="30" x2="0" y2="200"/><text id="wmMaxT" class="tm" x="0" y="24" text-anchor="middle"></text>
+  <line id="wmLine" class="lna" x1="0" y1="30" x2="0" y2="200"/><text id="wmLineT" class="tm ta" x="0" y="252" text-anchor="middle"></text>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="calc" style="margin-top:0">
+    <p class="small muted" style="margin:0 0 .3rem" id="wmStep"></p>
+    <p style="margin:0" id="wmNote" aria-live="polite"></p>
+    <div class="out" id="wmOut" aria-live="polite"></div>
+    <div class="ctrl">
+      <button class="btn ghost" id="wmBack">Back</button>
+      <button class="btn" id="wmNext">Next batch</button>
+      <button class="btn ghost" id="wmReset">Reset</button>
+    </div>
+  </div>
+  <ul>
+    <li><b>Late but within the delay</b> (12:09 arriving after 12:14): still counted.</li>
+    <li><b>Later than the watermark</b> (12:08 arriving when the watermark is 12:11): dropped, and counted in the progress metric <code>numRowsDroppedByWatermark</code>.</li>
+    <li><b>The trade-off:</b> a longer delay accepts later data but holds more state and delays append-mode results by that much.</li>
+    <li>The guarantee is one-sided: data within the delay is <b>never</b> dropped; data beyond it <b>may</b> be dropped, not "will".</li>
+  </ul>
+
+  <section id="state-store">
+    <h2>The state store</h2>
+    <p>Each stateful operator keeps its state in a <b>state store</b> on the executors, split into one partition per shuffle partition and versioned per batch in the checkpoint.</p>
+    <div class="tbl"><table>
+      <thead><tr><th></th><th>Default (HDFS-backed)</th><th>RocksDB</th></tr></thead>
+      <tbody>
+        <tr><td>Where state lives</td><td>Executor JVM heap (a hash map per partition)</td><td>Native RocksDB on local disk, with a memory cache</td></tr>
+        <tr><td>Scales to</td><td>State that fits comfortably in heap</td><td>Millions of keys and more, without GC pressure</td></tr>
+        <tr><td>Checkpointing</td><td>Delta files per batch, snapshots periodically</td><td>SST files; changelog checkpointing uploads only changes</td></tr>
+        <tr><td>Enable</td><td>Default in open-source Spark</td><td><code>spark.sql.streaming.stateStore.providerClass</code> = <code>…RocksDBStateStoreProvider</code></td></tr>
+      </tbody></table></div>
+    <p>Use RocksDB for any sizeable state; Databricks recommends it, with changelog checkpointing. The provider can't be switched on an existing checkpoint without rebuilding the state.</p>
+  </section>
+
+  <section id="joins">
+    <h2>Stream-stream joins</h2>
+    <p>Both sides are unbounded, so Spark buffers each side's rows in state to match future rows from the other side. Without limits that state grows forever. Bound it with <b>a watermark on both sides</b> and an <b>event-time range in the join condition</b>:</p>
+<pre><code>imps   = impressions.withWatermark("imp_ts", "2 hours")
+clicks = clicks_raw.withWatermark("click_ts", "3 hours")
+joined = imps.join(clicks, F.expr("""
+            click_ad_id = imp_ad_id AND
+            click_ts BETWEEN imp_ts AND imp_ts + INTERVAL 1 hour"""), "leftOuter")</code></pre>
+    <ul>
+      <li><b>Inner joins:</b> watermarks and time bounds are optional but needed to clean state; without them state grows forever.</li>
+      <li><b>Outer joins:</b> watermarks and a time bound are <b>required</b>. Unmatched rows are written (with nulls) only once the watermark says no match can still arrive, so they're delayed.</li>
+      <li><b>Stream-static joins</b> are stateless (<a href="../fundamentals/examples.html#stream-static">Module 1</a>).</li>
+    </ul>
+  </section>
+
+  <section id="dedup">
+    <h2>Deduplication</h2>
+<pre><code>events.withWatermark("event_ts", "1 hour").dropDuplicates(["event_id", "event_ts"])  <span class="muted"># state bounded by the watermark</span>
+events.withWatermark("event_ts", "1 hour").dropDuplicatesWithinWatermark(["event_id"])  <span class="muted"># Spark 3.5+</span></code></pre>
+    <p>Plain <code>dropDuplicates("event_id")</code> on a stream keeps every id ever seen in state. Including the event-time column lets the watermark expire old keys; <code>dropDuplicatesWithinWatermark</code> does it when retries carry different timestamps.</p>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Setting or fact</th><th class="num">Value</th></tr></thead>
+      <tbody>
+        <tr><td>Watermark</td><td class="num">max event time − delay</td></tr>
+        <tr><td>When a new watermark takes effect</td><td class="num">from the next batch</td></tr>
+        <tr><td><code>spark.sql.streaming.multipleWatermarkPolicy</code></td><td class="num">min</td></tr>
+        <tr><td>Session windows (<code>session_window</code>)</td><td class="num">Spark 3.2+</td></tr>
+        <tr><td><code>dropDuplicatesWithinWatermark</code></td><td class="num">Spark 3.5+</td></tr>
+        <tr><td><code>transformWithState</code> (timers, TTL, multiple state variables)</td><td class="num">Spark 4.0+</td></tr>
+        <tr><td>State store provider</td><td class="num">HDFS-backed (in memory)</td></tr>
+        <tr><td>State partitions</td><td class="num">shuffle partitions at first run</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">Late data</div>"I aggregate on event time and set a watermark: the latest event time minus how late I'm willing to accept data. Anything within that delay is counted; anything older may be dropped, and the progress metrics show how many. The delay is a trade-off between completeness, state size and how soon append mode writes final results."</div>
+    <div class="callout say"><div class="lbl">State</div>"Every stateful operator keeps state per key on the executors, checkpointed each batch. Watermarks are what let Spark delete it. For large state I use the RocksDB provider with changelog checkpointing, and I size shuffle partitions before the first run because the state is locked to that number."</div>
+    <div class="callout say"><div class="lbl">Stream-stream joins</div>"Both sides are buffered in state, so I put a watermark on each side and an event-time range in the join condition. That's optional for inner joins but required for outer joins, and outer join nulls only appear once the watermark passes."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>Watermark delay is 10 minutes. The latest event seen is 12:30. An event for 12:25 arrives. Counted?</summary><div>Yes. The watermark is 12:20, and 12:25 is newer. Even an event at 12:21 would count.</div></details>
+      <details><summary>With append mode and a 10-minute tumbling window plus a 15-minute watermark, when is the 12:00–12:10 window written?</summary><div>When the watermark passes 12:10, i.e. once an event with an event time of 12:25 or later has been seen, in the batch after that (or a no-data batch). So results lag event time by at least the window length plus the delay.</div></details>
+      <details><summary>Two streams are unioned, each with its own watermark. Which one applies?</summary><div>By default the minimum of the two (<code>multipleWatermarkPolicy = min</code>), so the slower stream holds back the watermark and nothing is dropped from it. <code>max</code> follows the faster stream and may drop the slower one's data.</div></details>
+      <details><summary>Your dedup state grows every day. Why?</summary><div><code>dropDuplicates</code> without a watermark, or without the event-time column in the key, keeps every key forever. Add a watermark and include the event-time column, or use <code>dropDuplicatesWithinWatermark</code>.</div></details>
+      <details><summary>Why are left-outer join results with nulls delayed?</summary><div>Spark can only say "no match" once the watermark guarantees no matching row can still arrive within the join's time range. Until then the left row waits in state.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html"><span class="n">Deep dive</span><b>How state really works</b><p>The state store's memory and checkpoint behaviour, RocksDB tuning, exactly how watermarks advance and evict, join state cleanup, and arbitrary state with transformWithState.</p></a>
+      <a class="mod" href="examples.html"><span class="n">Examples</span><b>Windows, joins, dedup in code</b><p>Windowed and session aggregations, a time-bounded stream-stream join, deduplication, and a calculator for how much state a join holds.</p></a>
+      <a class="mod" href="production.html"><span class="n">Production issues</span><b>When state goes wrong</b><p>State that never stops growing, data silently dropped as late, executor memory pressure, slow state checkpoints and query changes that break the checkpoint.</p></a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../fundamentals/index.html"><span>Previous · Module 1</span><b>Streaming fundamentals</b></a>
+    <a href="../sources-sinks/index.html"><span>Next · Module 3</span><b>Sources &amp; sinks</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg";
+function el(tag,a,p,txt){const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;p.appendChild(e);return e}
+const hm=m=>m<0?"11:"+String(60+m).padStart(2,"0"):"12:"+String(m).padStart(2,"0");
+/* window types */
+const X0=130,S=20,EV=[1,3,7,14,15,24,27];
+function axis(g,y,max){for(let m=0;m<=max;m+=5){el("line",{class:"ln",x1:X0+m*S,y1:y,x2:X0+m*S,y2:y+6},g);el("text",{class:"tm",x:X0+m*S,y:y+20,"text-anchor":"middle"},g,hm(m))}el("line",{class:"ln",x1:X0,y1:y,x2:X0+max*S,y2:y},g)}
+axis($("wAxis"),200,35);
+EV.forEach((m,i)=>{const up=i>0&&m-EV[i-1]<3;el("circle",{class:"dot",cx:X0+m*S,cy:186,r:6},$("wEvts"));el("text",{class:"tm",x:X0+m*S,y:up?158:172,"text-anchor":"middle"},$("wEvts"),hm(m))});
+function wins(k){
+  if(k==="tumbling")return [0,10,20].map(s=>[s,s+10]);
+  if(k==="sliding"){const r=[];for(let s=-5;s<30;s+=5)if(EV.some(e=>e>=s&&e<s+10))r.push([s,s+10]);return r}
+  const r=[];let st=EV[0],end=EV[0]+5;EV.slice(1).forEach(e=>{if(e<end)end=e+5;else{r.push([st,end]);st=e;end=e+5}});r.push([st,end]);return r}
+function wdraw(k){const g=$("wWins");g.innerHTML="";const w=wins(k),lanes=k==="sliding"?2:1;
+  w.forEach((p,i)=>{const lane=lanes===2?i%2:0,y=20+lane*62,a=Math.max(p[0],-5),n=EV.filter(e=>e>=p[0]&&e<p[1]).length;
+    el("rect",{class:i%2?"bxb":"bxa",x:X0+a*S,y:y,width:(p[1]-a)*S-3,height:50,rx:6},g);
+    el("text",{class:"tb",x:X0+a*S+8,y:y+22},g,hm(p[0])+"–"+hm(p[1]));
+    el("text",{class:"ts",x:X0+a*S+8,y:y+40},g,n+" event"+(n>1?"s":""))});
+  const note={tumbling:"Fixed, non-overlapping 10-minute windows. Every event is in exactly one window.",
+    sliding:"10-minute windows starting every 5 minutes, so they overlap and every event is counted in two windows. Windows are shown on two rows so the overlap is visible.",
+    session:"A session starts at an event and extends 5 minutes past the last event. A gap of 5 minutes or more closes it. The 12:07 event keeps the first session open until 12:12; 12:14 starts a new one."}[k];
+  $("wNote").textContent=note}
+document.querySelectorAll("#wTabs button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("#wTabs button").forEach(x=>x.setAttribute("aria-selected",x===b));wdraw(b.dataset.k)}));
+wdraw("tumbling");
+/* watermark stepper: 10-min tumbling windows, 10-min delay */
+const WX=60,WS=19,DELAY=10,BATCHES=[[2,7],[14,9],[21],[8,26],[33],[18]];
+axis($("wmAxis"),200,40);
+const winR={};[0,10,20,30].forEach(s=>{winR[s]=el("rect",{class:"bx",x:WX+s*WS+2,y:60,width:10*WS-4,height:120,rx:6},$("wmWins"));
+  winR[s].lbl=el("text",{class:"tm",x:WX+s*WS+10,y:78},$("wmWins"),hm(s)+"–"+hm(s+10))});
+let step=0;
+function sim(n){let wm=-Infinity,mx=-Infinity;const cnt={},done={},evs=[];let note="";
+  for(let b=0;b<n;b++){const inEffect=wm,acc=[],drop=[];
+    BATCHES[b].forEach(t=>{if(t<inEffect){drop.push(t);evs.push({t,b,drop:true})}else{acc.push(t);const w=Math.floor(t/10)*10;cnt[w]=(cnt[w]||0)+1;evs.push({t,b})}mx=Math.max(mx,t)});
+    wm=Math.max(wm,mx-DELAY);const emitted=[];Object.keys(cnt).forEach(w=>{w=+w;if(!done[w]&&w+10<=wm){done[w]=cnt[w];emitted.push(w)}});
+    if(b===n-1)note=`Batch ${b+1} receives ${BATCHES[b].map(hm).join(" and ")}. Watermark in effect: ${inEffect===-Infinity?"none yet":hm(inEffect)}. `+
+      (drop.length?`${drop.map(hm).join(", ")} is older than the watermark, so it's dropped. `:"")+
+      (acc.length?`${acc.map(hm).join(", ")} ${acc.length>1?"are":"is"} counted. `:"")+
+      `Latest event time is now ${hm(mx)}, so the watermark moves to ${hm(mx)} − 10 min = ${wm<0?"before 12:00":hm(wm)}. `+
+      (emitted.length?`Window ${emitted.map(w=>hm(w)+"–"+hm(w+10)).join(", ")} ends at or before it: it's final, written in append mode, and its state is deleted.`:(Object.keys(done).length?"No more windows end at or before the watermark, so nothing new is written in this batch.":"No window has ended before the watermark, so nothing is written yet."))}
+  return {wm,mx,cnt,done,evs,note}}
+function wmRender(){const r=sim(step);$("wmEvts").innerHTML="";
+  const lane={};r.evs.forEach(e=>{const w=Math.floor(e.t/10)*10,k=lane[w]=(lane[w]||0)+1,x=WX+e.t*WS,y=88+k*20;
+    if(e.drop){el("text",{class:"tb",x:x,y:y+5,"text-anchor":"middle",style:"fill:var(--bad)"},$("wmEvts"),"×");el("text",{class:"tm",x:x+10,y:y+5},$("wmEvts"),hm(e.t)+" dropped")}
+    else{el("circle",{class:e.b===step-1?"dotA":"dot",cx:x,cy:y,r:6},$("wmEvts"));el("text",{class:"tm",x:x+10,y:y+5},$("wmEvts"),hm(e.t))}});
+  [0,10,20,30].forEach(s=>winR[s].setAttribute("class",r.done[s]!=null?"bxo":r.cnt[s]?"bxb":"bx"));
+  const pos=v=>WX+Math.max(-2,Math.min(42,v))*WS,vis=v=>v>-Infinity&&step>0;
+  [["wmMax",r.mx,"latest "],["wmLine",r.wm,"watermark "]].forEach(([id,v,l])=>{const on=vis(v)&&v>=0;$(id).style.display=on?"":"none";$(id+"T").style.display=on?"":"none";
+    if(on){$(id).setAttribute("x1",pos(v));$(id).setAttribute("x2",pos(v));$(id+"T").setAttribute("x",pos(v));$(id+"T").textContent=l+hm(v)}});
+  $("wmStep").textContent=step===0?"Before batch 1":"Batch "+step+" of "+BATCHES.length;
+  $("wmNote").textContent=step===0?"Four 10-minute windows, nothing received yet. Watermark delay: 10 minutes. Output mode: append.":r.note;
+  const open=Object.keys(r.cnt).filter(w=>r.done[w]==null).map(w=>hm(+w)+": "+r.cnt[w]).join(", ")||"none";
+  const out=Object.keys(r.done).map(w=>hm(+w)+": "+r.done[w]).join(", ")||"none";
+  $("wmOut").innerHTML=`<div><b>${open}</b><span>windows in state (count so far)</span></div><div><b>${out}</b><span>windows written (final counts)</span></div><div><b>${r.evs.filter(e=>e.drop).length}</b><span>events dropped as late</span></div>`;
+  $("wmBack").disabled=step===0;$("wmNext").disabled=step===BATCHES.length}
+$("wmNext").addEventListener("click",()=>{if(step<BATCHES.length){step++;wmRender()}});
+$("wmBack").addEventListener("click",()=>{if(step>0){step--;wmRender()}});
+$("wmReset").addEventListener("click",()=>{step=0;wmRender()});
+wmRender();
+})();
+</script>
+<script>
+(function(){
+  const KEY="de-learning-done-v2",items=[[1, "How to handle late data in Structured Streaming"], [6, "Stateful operations and the RocksDB state store"], [7, "Stream-stream joins and watermarks"], [12, "Window types: tumbling, sliding and session windows"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="stream"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

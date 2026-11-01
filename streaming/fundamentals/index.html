@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Structured Streaming Fundamentals</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html" aria-current="page">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><span aria-current="page">Streaming fundamentals</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 1 of 4 · Overview</p>
+  <h1>A stream is a table that keeps growing</h1>
+  <p class="lede">Structured Streaming runs your DataFrame query again and again on new data, as a series of small batch jobs. Know the micro-batch loop, triggers, output modes and checkpoints, and most streaming interview questions become batch questions you already know. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#model">The model</a><a href="#loop">Micro-batch loop</a><a href="#triggers">Triggers</a><a href="#output-modes">Output modes</a><a href="#stateless-stateful">Stateless vs stateful</a><a href="#exactly-once">Exactly-once</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="model">
+    <h2>The model: an unbounded input table</h2>
+    <p>Structured Streaming treats a stream as an <b>input table that only grows</b>. You write an ordinary DataFrame query against it. Spark runs that query <b>incrementally</b>: each run reads only the rows that arrived since the last run, updates any running state, and writes the change to a sink.</p>
+    <p>By default each run is a <b>micro-batch</b>: a normal Spark job with the same Catalyst plan, stages and tasks you know from <a href="../../spark/execution/index.html">Spark Core</a>. The streaming engine adds three things on top: deciding <b>which new data</b> goes in each batch, <b>remembering progress</b> in a checkpoint, and carrying <b>state</b> between batches for aggregations, deduplication and joins.</p>
+<pre><code>(spark.readStream.format("kafka")                    <span class="muted"># source: where new rows come from</span>
+      .option("kafka.bootstrap.servers", brokers).option("subscribe", "orders").load()
+      .selectExpr("CAST(value AS STRING) AS json")
+      .select(F.from_json("json", schema).alias("o")).select("o.*")   <span class="muted"># ordinary DataFrame code</span>
+      .writeStream.format("delta")                   <span class="muted"># sink: where results go</span>
+      .option("checkpointLocation", "/chk/orders_bronze")             <span class="muted"># progress + state</span>
+      .trigger(processingTime="1 minute")            <span class="muted"># when to run the next micro-batch</span>
+      .toTable("bronze.orders"))</code></pre>
+  </section>
+
+  <section id="loop">
+    <h2>The micro-batch loop, and why a crash doesn't duplicate data</h2>
+    <p>Every micro-batch follows the same five steps. The order matters: the batch's input range is written down <b>before</b> any work starts, and the batch is marked done only <b>after</b> the sink write succeeds. Step through a normal batch, then a crash.</p>
+    <div class="seg" role="tablist" aria-label="Scenario" id="loopTabs">
+      <button role="tab" aria-selected="true" data-k="ok">Normal batch</button>
+      <button role="tab" aria-selected="false" data-k="crash">Crash before the commit</button>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 250" role="img" aria-labelledby="loopT">
+  <title id="loopT">Micro-batch loop: source, offset log, Spark job, sink and commit log, with the checkpoint holding both logs</title>
+  <defs><marker id="la" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0L10,5L0,10z"/></marker></defs>
+  <rect class="bx" id="n-src" x="20" y="40" width="140" height="64" rx="8"/><text class="tb" x="90" y="68" text-anchor="middle">Source</text><text class="ts" x="90" y="88" text-anchor="middle">Kafka, files, Delta</text>
+  <rect class="bx" id="n-off" x="200" y="40" width="140" height="64" rx="8"/><text class="tb" x="270" y="68" text-anchor="middle">Plan batch N</text><text class="ts" x="270" y="88" text-anchor="middle">pick an input range</text>
+  <rect class="bx" id="n-job" x="380" y="40" width="140" height="64" rx="8"/><text class="tb" x="450" y="68" text-anchor="middle">Spark job</text><text class="ts" x="450" y="88" text-anchor="middle">read, transform, state</text>
+  <rect class="bx" id="n-sink" x="560" y="40" width="140" height="64" rx="8"/><text class="tb" x="630" y="68" text-anchor="middle">Sink</text><text class="ts" x="630" y="88" text-anchor="middle">write batch N</text>
+  <rect class="bx" id="n-com" x="740" y="40" width="100" height="64" rx="8"/><text class="tb" x="790" y="68" text-anchor="middle">Mark done</text><text class="ts" x="790" y="88" text-anchor="middle">commit N</text>
+  <line class="ln" x1="160" y1="72" x2="196" y2="72" marker-end="url(#la)"/><line class="ln" x1="340" y1="72" x2="376" y2="72" marker-end="url(#la)"/>
+  <line class="ln" x1="520" y1="72" x2="556" y2="72" marker-end="url(#la)"/><line class="ln" x1="700" y1="72" x2="736" y2="72" marker-end="url(#la)"/>
+  <rect class="bx2" x="200" y="150" width="640" height="84" rx="8"/>
+  <text class="th" x="216" y="174">Checkpoint</text>
+  <text class="tm" x="216" y="200">offsets/</text><text class="t" id="cp-off" x="300" y="200">0 … 41</text>
+  <text class="tm" x="216" y="222">commits/</text><text class="t" id="cp-com" x="300" y="222">0 … 41</text>
+  <text class="tm" x="520" y="200">sink</text><text class="t" id="cp-sink" x="570" y="200">batches 0 … 41 written</text>
+  <line class="ln dash" x1="270" y1="104" x2="270" y2="146"/><line class="ln dash" x1="790" y1="104" x2="790" y2="146"/>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="calc" style="margin-top:0">
+    <p class="small muted" style="margin:0 0 .3rem" id="loopStep" aria-live="polite"></p>
+    <p style="margin:0" id="loopNote" aria-live="polite"></p>
+    <div class="ctrl">
+      <button class="btn ghost" id="loopBack">Back</button>
+      <button class="btn" id="loopNext">Next</button>
+      <button class="btn ghost" id="loopReset">Reset</button>
+    </div>
+  </div>
+  <p class="small muted">The sink "remembers" batch N because the Delta sink records the query id and batch id in each commit, so a replayed batch is skipped. That's why the sink choice matters for exactly-once: see <a href="#exactly-once">below</a>.</p>
+
+  <section id="triggers">
+    <h2>Triggers: when the next batch runs</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Trigger</th><th>Behaviour</th><th>Use for</th></tr></thead>
+      <tbody>
+        <tr><td><b>Default</b> (none set)</td><td>Start the next micro-batch as soon as the previous one finishes</td><td>Lowest latency in micro-batch mode; cluster always busy</td></tr>
+        <tr><td><code>processingTime="1 minute"</code></td><td>Start a batch every interval; if one overruns, the next starts immediately after</td><td>Steady latency target with less overhead per row</td></tr>
+        <tr><td><code>availableNow=True</code> (Spark 3.3+)</td><td>Process everything available at start, in several batches respecting rate limits, then stop</td><td>Scheduled incremental jobs: streaming semantics at batch cost. Required on Databricks serverless</td></tr>
+        <tr><td><code>once=True</code></td><td>One batch with everything available, then stop</td><td>Deprecated: ignores rate limits, so a big backlog becomes one huge batch. Use <code>availableNow</code></td></tr>
+        <tr><td><code>continuous="1 second"</code></td><td>Long-running tasks, no micro-batches; about millisecond latency</td><td>Experimental: map-like queries only (no aggregations), at-least-once</td></tr>
+      </tbody></table></div>
+    <p>The trigger changes <b>when</b> work runs, not <b>what</b> the query means. The same query and checkpoint can move between <code>processingTime</code> and <code>availableNow</code> as cost and latency needs change.</p>
+  </section>
+
+  <section id="output-modes">
+    <h2>Output modes: what each batch writes</h2>
+    <p>The output mode decides which rows of the result table go to the sink after each batch. Step through three batches of a running <b>count by key</b> and switch modes.</p>
+    <div class="seg" role="tablist" aria-label="Output mode" id="omTabs">
+      <button role="tab" aria-selected="false" data-k="append">append</button>
+      <button role="tab" aria-selected="true" data-k="update">update</button>
+      <button role="tab" aria-selected="false" data-k="complete">complete</button>
+    </div>
+    <div class="ba" id="omView" aria-live="polite"></div>
+    <div class="ctrl">
+      <button class="btn ghost" id="omBack">Previous batch</button>
+      <button class="btn" id="omNext">Next batch</button>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>Mode</th><th>Writes</th><th>Allowed with</th></tr></thead>
+      <tbody>
+        <tr><td><b>append</b> (default)</td><td>Only new rows that will never change</td><td>Stateless queries; aggregations only with a watermark (a window is written once it closes)</td></tr>
+        <tr><td><b>update</b></td><td>Only rows that changed in this batch</td><td>Aggregations; the sink must handle upserts (e.g. <code>foreachBatch</code> + MERGE)</td></tr>
+        <tr><td><b>complete</b></td><td>The whole result table, every batch</td><td>Aggregations only; small results (all state is rewritten each time)</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="stateless-stateful">
+    <h2>Stateless vs stateful</h2>
+    <div class="tbl"><table>
+      <thead><tr><th></th><th>Stateless</th><th>Stateful</th></tr></thead>
+      <tbody>
+        <tr><td>Examples</td><td><code>select</code>, <code>filter</code>, <code>withColumn</code>, <code>from_json</code>, joins to a static table</td><td><code>groupBy().agg()</code>, windows, <code>dropDuplicates</code>, stream-stream joins, <code>transformWithState</code></td></tr>
+        <tr><td>Each row depends on</td><td>Only itself</td><td>Rows from earlier batches</td></tr>
+        <tr><td>Checkpoint holds</td><td>Offsets and commits</td><td>Offsets, commits <b>and a state store</b></td></tr>
+        <tr><td>Cost driver</td><td>Input volume</td><td>Input volume <b>plus state size</b>, which grows unless a watermark bounds it</td></tr>
+        <tr><td>Changing the query</td><td>Usually safe with the same checkpoint</td><td>Changing keys or aggregations needs a new checkpoint</td></tr>
+        <tr><td>Output modes</td><td>append</td><td>append (with watermark), update, complete</td></tr>
+      </tbody></table></div>
+    <p>State lives on executors, keyed by the grouping columns and split into <code>spark.sql.shuffle.partitions</code> partitions fixed at the first run. Windows, watermarks and the state store are <a href="../state/index.html">Module 2</a>.</p>
+  </section>
+
+  <section id="exactly-once">
+    <h2>Checkpoints and exactly-once</h2>
+    <p>End-to-end exactly-once needs three things together. Remove any one and you get at-least-once (duplicates after a failure) or data loss.</p>
+    <ol class="rail">
+      <li><div><b>A replayable source</b> that can re-read a given range: Kafka offsets, file lists, Delta table versions.</div></li>
+      <li><div><b>A checkpoint</b> that records each batch's range before processing (offset log) and its completion after (commit log), plus any state.</div></li>
+      <li><div><b>An idempotent sink</b>, so rewriting a replayed batch has no effect: the Delta and file sinks track batch ids. <code>foreachBatch</code> and the Kafka sink are at-least-once unless you make the write idempotent yourself.</div></li>
+    </ol>
+    <div class="callout trap"><div class="lbl">Common trap</div>A checkpoint belongs to <b>one</b> query. Two queries sharing a checkpoint location corrupt each other's progress; copying a checkpoint to a different query or sink isn't supported. One query, one checkpoint, kept as long as the query lives.</div>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Setting or fact</th><th class="num">Default</th></tr></thead>
+      <tbody>
+        <tr><td>Trigger</td><td class="num">next batch ASAP</td></tr>
+        <tr><td>Output mode</td><td class="num">append</td></tr>
+        <tr><td><code>availableNow</code> trigger</td><td class="num">Spark 3.3+</td></tr>
+        <tr><td>File source <code>maxFilesPerTrigger</code> / Auto Loader <code>cloudFiles.maxFilesPerTrigger</code></td><td class="num">no limit / 1,000</td></tr>
+        <tr><td>Kafka <code>maxOffsetsPerTrigger</code></td><td class="num">no limit</td></tr>
+        <tr><td>State partitions</td><td class="num">= shuffle partitions at first run</td></tr>
+        <tr><td><code>spark.sql.streaming.minBatchesToRetain</code> (checkpoint history kept)</td><td class="num">100</td></tr>
+        <tr><td>Checkpoint folders</td><td class="num">offsets, commits, metadata, sources, state</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">How it works</div>"Structured Streaming treats the stream as an unbounded table and runs my DataFrame query incrementally in micro-batches. Each batch is a normal Spark job. Before it runs, Spark writes the batch's input range to the offset log in the checkpoint; after the sink write succeeds, it writes the commit log. On restart, any batch that has an offset entry but no commit is re-run with exactly the same range."</div>
+    <div class="callout say"><div class="lbl">Exactly-once</div>"Exactly-once is end to end: a replayable source like Kafka or Delta, the checkpoint, and an idempotent sink. The Delta sink records the batch id, so a replayed batch is skipped. With foreachBatch I make the write idempotent myself, with a MERGE or Delta's txnAppId and txnVersion options."</div>
+    <div class="callout say"><div class="lbl">Triggers and cost</div>"For most ingestion I use availableNow on a schedule: it processes the backlog with streaming's incremental guarantees and then shuts down, so I don't pay for an idle cluster. I keep a continuously running query with a processing-time trigger only where minutes of latency matter."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>What's the difference between <code>once</code> and <code>availableNow</code>?</summary><div>Both process what's available and stop. <code>once</code> does it in a single batch and ignores rate limits like <code>maxFilesPerTrigger</code>, so a large backlog becomes one huge batch. <code>availableNow</code> splits it into several batches that respect those limits. <code>once</code> is deprecated.</div></details>
+      <details><summary>A count-by-key query fails with "Append output mode not supported". Why, and what are the options?</summary><div>Append writes rows that never change, but a running count changes every batch. Use update (with an upsert sink) or complete (small results), or add a watermark and a window so each window's count is final once the watermark passes it.</div></details>
+      <details><summary>The job crashed after writing to the sink but before the commit log. What happens on restart?</summary><div>The batch has an offset entry but no commit, so Spark re-runs it with the same input range. A Delta or file sink sees the batch id was already written and skips it; a non-idempotent <code>foreachBatch</code> write would duplicate it.</div></details>
+      <details><summary>Is a stream-static join stateful?</summary><div>No. Each micro-batch joins its new rows with the static table, read at that batch (a Delta static side picks up its latest version each batch). Nothing is carried between batches. Stream-stream joins are stateful.</div></details>
+      <details><summary>Can you change <code>spark.sql.shuffle.partitions</code> for a running stateful query?</summary><div>Not with the same checkpoint: the state is already split into that many partitions, and Spark keeps the original number. Changing it needs a new checkpoint (and so a state rebuild or reprocessing).</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html"><span class="n">Deep dive</span><b>Inside the engine</b><p>What's in each checkpoint folder, how the source and sink contracts give exactly-once, trigger edge cases, continuous processing, and what a micro-batch looks like in the Spark UI.</p></a>
+      <a class="mod" href="examples.html"><span class="n">Examples</span><b>Runnable patterns</b><p>The same query with each trigger, output modes side by side in code, idempotent <code>foreachBatch</code> writes, and reading a query's progress.</p></a>
+      <a class="mod" href="production.html"><span class="n">Production issues</span><b>When streams misbehave</b><p>Duplicates after restart, shared or deleted checkpoints, a stuck query, append-mode errors and huge first batches.</p></a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../index.html"><span>Back</span><b>Structured Streaming</b></a>
+    <a href="../state/index.html"><span>Next · Module 2</span><b>State, windows &amp; watermarks</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+function tabs(id,fn){const box=$(id);box.querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{box.querySelectorAll("button").forEach(x=>x.setAttribute("aria-selected",x===b));fn(b.dataset.k)}))}
+/* micro-batch loop stepper */
+const L={
+  ok:[
+    {n:"n-src",t:"Batch 42 starts. Spark asks the source for its latest available position, for example Kafka offset 15,200 on each partition.",off:"0 … 41",com:"0 … 41",sink:"batches 0 … 41 written"},
+    {n:"n-off",t:"It picks the input range for batch 42 (capped by rate limits such as maxOffsetsPerTrigger) and writes it to offsets/42 before doing any work. This is a write-ahead log.",off:"0 … 42",com:"0 … 41",sink:"batches 0 … 41 written"},
+    {n:"n-job",t:"A normal Spark job reads exactly that range, runs your transformations, and updates the state store if the query is stateful.",off:"0 … 42",com:"0 … 41",sink:"batches 0 … 41 written"},
+    {n:"n-sink",t:"The sink writes batch 42. The Delta sink records the query id and batch id in the same table commit.",off:"0 … 42",com:"0 … 41",sink:"batches 0 … 42 written"},
+    {n:"n-com",t:"Only now does Spark write commits/42. Batch 42 is done, and batch 43 plans from where 42 ended.",off:"0 … 42",com:"0 … 42",sink:"batches 0 … 42 written"}],
+  crash:[
+    {n:"n-off",t:"Batch 42's range is written to offsets/42.",off:"0 … 42",com:"0 … 41",sink:"batches 0 … 41 written"},
+    {n:"n-sink",t:"The job runs and the sink writes batch 42.",off:"0 … 42",com:"0 … 41",sink:"batches 0 … 42 written"},
+    {n:"n-com",t:"The driver crashes before writing commits/42.",bad:true,off:"0 … 42",com:"0 … 41 (no 42)",sink:"batches 0 … 42 written"},
+    {n:"n-off",t:"On restart, Spark finds offsets/42 without commits/42, so batch 42 must be re-run with exactly the same range. It doesn't plan a new, different batch.",off:"0 … 42",com:"0 … 41",sink:"batches 0 … 42 written"},
+    {n:"n-sink",t:"The Delta sink sees batch 42 of this query is already in the table and skips the write. No duplicates. A plain foreachBatch append would write the rows a second time.",off:"0 … 42",com:"0 … 41",sink:"batch 42 skipped (already written)"},
+    {n:"n-com",t:"commits/42 is written and the stream continues with batch 43.",off:"0 … 42",com:"0 … 42",sink:"batches 0 … 42 written"}]
+};
+let sc="ok",i=0,hl=null;
+function loop(){const s=L[sc][i];
+  if(hl)$(hl).setAttribute("class","bx");hl=s.n;$(s.n).setAttribute("class",s.bad?"bxr hit":"bxa hit");
+  $("cp-off").textContent=s.off;$("cp-com").textContent=s.com;$("cp-sink").textContent=s.sink;
+  $("loopStep").textContent="Step "+(i+1)+" of "+L[sc].length;$("loopNote").textContent=s.t;
+  $("loopBack").disabled=i===0;$("loopNext").disabled=i===L[sc].length-1;}
+$("loopNext").addEventListener("click",()=>{if(i<L[sc].length-1){i++;loop()}});
+$("loopBack").addEventListener("click",()=>{if(i>0){i--;loop()}});
+$("loopReset").addEventListener("click",()=>{i=0;loop()});
+tabs("loopTabs",k=>{sc=k;i=0;loop()});loop();
+/* output modes */
+const B=[["a","b","a"],["b","c"],["a"]];let m="update",bi=0;
+function om(){
+  const before={},after={};B.slice(0,bi).flat().forEach(k=>before[k]=(before[k]||0)+1);B.slice(0,bi+1).flat().forEach(k=>after[k]=(after[k]||0)+1);
+  const changed=Object.keys(after).filter(k=>after[k]!==before[k]).sort(),all=Object.keys(after).sort();
+  const rows=ks=>ks.map(k=>`<tr><td>${k}</td><td class="num">${after[k]}</td></tr>`).join("");
+  let out;
+  if(m==="append")out=`<p class="note" style="margin:0">Not allowed: <code>AnalysisException: Append output mode not supported when there are streaming aggregations … without watermark</code>. A running count is never final, so there's nothing safe to append.</p>`;
+  else{const ks=m==="update"?changed:all;out=`<div class="tbl" style="margin:0"><table><thead><tr><th>key</th><th class="num">count</th></tr></thead><tbody>${rows(ks)}</tbody></table></div><p class="small muted" style="margin:.4rem 0 0">${ks.length} row${ks.length>1?"s":""} written${m==="update"?" (only keys that changed)":" (the whole table)"}</p>`}
+  $("omView").innerHTML=`<div><h4>Batch ${bi+1} input</h4><p style="margin:0;font-family:var(--mono)">${B[bi].join(", ")}</p><p class="small muted" style="margin:.4rem 0 0">Running state after it: ${all.map(k=>k+"="+after[k]).join(", ")}</p></div><div><h4>Written to the sink · ${m}</h4>${out}</div>`;
+  $("omBack").disabled=bi===0;$("omNext").disabled=bi===B.length-1;}
+$("omNext").addEventListener("click",()=>{if(bi<B.length-1){bi++;om()}});
+$("omBack").addEventListener("click",()=>{if(bi>0){bi--;om()}});
+tabs("omTabs",k=>{m=k;om()});om();
+})();
+</script>
+<script>
+(function(){
+  const KEY="de-learning-done-v2",items=[[0, "Different output modes in Structured Streaming"], [3, "Trigger types (processingTime, availableNow, continuous)"], [4, "Checkpointing and exactly-once guarantees"], [11, "Stateless vs stateful streaming"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="stream"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

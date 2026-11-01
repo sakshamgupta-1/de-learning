@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Streaming Sources and Sinks: Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html" aria-current="page">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Sources &amp; sinks</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 3 of 4 · Deep dive</p>
+  <h1>How sources track progress</h1>
+  <p class="lede">Auto Loader's file tracking and schema evolution, Kafka offsets and rate controls, the Avro wire format and compatibility rules, and Delta tables as a streaming source.</p>
+  <div class="toc">
+    <a href="#al-internals">Auto Loader internals</a><a href="#al-schema">Schema inference and evolution</a><a href="#kafka-offsets">Kafka offsets and rates</a><a href="#avro-wire">Avro wire format</a><a href="#delta-source">Delta as a source</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="al-internals">
+    <h2>Auto Loader internals</h2>
+    <ul>
+      <li><b>File tracking:</b> discovered files are recorded in a RocksDB key-value store under the checkpoint's <code>sources/</code> folder. A file path is processed once, even if it's listed or notified again. A file <b>overwritten</b> in place at the same path isn't re-ingested unless <code>cloudFiles.allowOverwrites</code> is set.</li>
+      <li><b>First run:</b> <code>includeExistingFiles=true</code> (default) ingests what's already there; <code>modifiedAfter</code> / <code>modifiedBefore</code> limit by file time.</li>
+      <li><b>Batch size:</b> <code>maxFilesPerTrigger</code> (1,000) and <code>maxBytesPerTrigger</code>; a file is never split across micro-batches.</li>
+      <li><b>Notification mode safety net:</b> <code>cloudFiles.backfillInterval</code> (for example <code>"1 day"</code>) runs an asynchronous listing to catch files whose events were lost.</li>
+      <li><b>Moving checkpoints:</b> the RocksDB file list is tied to the checkpoint; a new checkpoint means Auto Loader rediscovers everything (limit it with <code>modifiedAfter</code>).</li>
+      <li>How micro-batches turn into Spark jobs and tasks for Auto Loader: <a href="../../spark/execution/production.html#microbatch">Spark Core case study</a>.</li>
+    </ul>
+  </section>
+
+  <section id="al-schema">
+    <h2>Schema inference and evolution</h2>
+    <p>With <code>cloudFiles.schemaLocation</code> set, Auto Loader samples files (up to 50 GB or 1,000 files by default) to infer a schema and stores it under that location, versioned. For JSON, CSV and XML, columns are inferred as <b>strings</b> unless <code>cloudFiles.inferColumnTypes=true</code>; use <code>cloudFiles.schemaHints</code> to pin types you know.</p>
+    <div class="tbl"><table>
+      <thead><tr><th><code>schemaEvolutionMode</code></th><th>When a new column appears</th></tr></thead>
+      <tbody>
+        <tr><td><b>addNewColumns</b> (default without a given schema)</td><td>The stream fails once with an <code>UnknownFieldException</code>; the stored schema gains the column; the restart continues with it. Existing column types never change.</td></tr>
+        <tr><td><b>rescue</b></td><td>Schema never changes; new columns' data goes into <code>_rescued_data</code>. The stream keeps running.</td></tr>
+        <tr><td><b>failOnNewColumns</b></td><td>The stream fails and stays failed until someone updates the schema or removes the file.</td></tr>
+        <tr><td><b>none</b> (default with a given schema)</td><td>New columns are ignored; nothing is rescued unless <code>rescuedDataColumn</code> is set.</td></tr>
+      </tbody></table></div>
+    <p><b><code>_rescued_data</code></b> also catches values that don't match the column type and fields whose name differs only by case, as JSON, so nothing is silently lost. Monitor it: rows with rescued data mean the source is drifting.</p>
+    <p class="small muted">Run jobs with retries so <code>addNewColumns</code> restarts are automatic. Lakeflow pipelines restart on schema change for you.</p>
+  </section>
+
+  <section id="kafka-offsets">
+    <h2>Kafka offsets and rate controls</h2>
+<pre><code>{"orders":{"0":15200,"1":15188,"2":15231}}     <span class="muted"># offsets file entry: next offset to read, per partition</span></code></pre>
+    <div class="tbl"><table>
+      <thead><tr><th>Option</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>startingOffsets</code></td><td><code>earliest</code>, <code>latest</code> or JSON per partition; new checkpoints only. Also <code>startingTimestamp</code> / <code>startingOffsetsByTimestamp</code></td></tr>
+        <tr><td><code>maxOffsetsPerTrigger</code></td><td>Upper bound on records per batch, split across partitions in proportion to their backlog</td></tr>
+        <tr><td><code>minOffsetsPerTrigger</code> + <code>maxTriggerDelay</code> (Spark 3.3+)</td><td>Wait until at least this many records are available, or the delay passes, to avoid tiny batches</td></tr>
+        <tr><td><code>minPartitions</code></td><td>Split Kafka partitions into more Spark tasks when partitions are few and large</td></tr>
+        <tr><td><code>failOnDataLoss</code></td><td>Fail (default) when expected offsets are gone, for example deleted by retention</td></tr>
+        <tr><td><code>includeHeaders</code></td><td>Expose message headers as a column</td></tr>
+      </tbody></table></div>
+    <ul>
+      <li><b>New partitions</b> added to a topic are picked up automatically, from their earliest offset.</li>
+      <li><b>Subscribe options:</b> <code>subscribe</code> (list), <code>subscribePattern</code> (regex), <code>assign</code> (specific partitions). Changing which topics a query reads is one of the changes that usually needs a new checkpoint.</li>
+      <li><b>Ordering</b> is per partition only; there's no global order across a topic.</li>
+    </ul>
+  </section>
+
+  <section id="avro-wire">
+    <h2>The Avro wire format and compatibility rules</h2>
+<pre class="tree"><code>byte 0      magic byte (0)
+bytes 1–4   schema id in the registry (big-endian int)
+bytes 5…    Avro binary, written with that schema (no schema inside)</code></pre>
+    <p>Avro resolves a writer's schema against a reader's schema field by name: fields in the writer but not the reader are skipped; fields in the reader but not the writer take the reader's default, or fail if there's none. Compatibility modes are just this rule applied in one or both directions:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Change</th><th>BACKWARD</th><th>FORWARD</th><th>FULL</th></tr></thead>
+      <tbody>
+        <tr><td>Add field with default</td><td>yes</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Add field without default</td><td>no</td><td>yes</td><td>no</td></tr>
+        <tr><td>Remove field with default</td><td>yes</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Remove field without default</td><td>yes</td><td>no</td><td>no</td></tr>
+        <tr><td>Widen int → long</td><td>yes</td><td>no</td><td>no</td></tr>
+        <tr><td>Rename, or string ↔ int</td><td>no</td><td>no</td><td>no</td></tr>
+      </tbody></table></div>
+    <ul>
+      <li><b>Spark is a consumer with a fixed schema</b> per query unless you resolve schemas per message. With open-source <code>from_avro</code>, pass the latest reader schema; under BACKWARD compatibility it can read all earlier messages.</li>
+      <li><b>Subjects</b> are usually <code>&lt;topic&gt;-value</code> and <code>&lt;topic&gt;-key</code> (TopicNameStrategy).</li>
+      <li><b>Protobuf and JSON Schema</b> use the same registry and wire-format idea with their own compatibility rules.</li>
+    </ul>
+  </section>
+
+  <section id="delta-source">
+    <h2>Delta tables as a streaming source</h2>
+    <ul>
+      <li>A Delta source reads new <b>commits</b>: <code>startingVersion</code> / <code>startingTimestamp</code> for a new checkpoint, then each batch's new data files, up to <code>maxFilesPerTrigger</code> (1,000) or <code>maxBytesPerTrigger</code>.</li>
+      <li>It expects an <b>append-only</b> table. A commit that changes existing rows (UPDATE, DELETE, MERGE) makes the stream fail, unless you tell it how to treat such commits. OPTIMIZE is fine: its commits are marked as not changing data.</li>
+    </ul>
+    <div class="tbl"><table>
+      <thead><tr><th>Option</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>skipChangeCommits</code></td><td>Skip commits that change existing rows; only appends flow. Recommended when downstream should ignore upstream corrections</td></tr>
+        <tr><td><code>ignoreDeletes</code></td><td>Ignore commits that only delete whole partitions</td></tr>
+        <tr><td><code>ignoreChanges</code> (deprecated)</td><td>Re-emit every row of rewritten files, producing duplicates</td></tr>
+        <tr><td><code>readChangeFeed</code></td><td>Stream the Change Data Feed instead: inserts, updates (pre and post images) and deletes, with <code>_change_type</code></td></tr>
+      </tbody></table></div>
+    <p>To propagate updates and deletes downstream, stream the change feed and MERGE it, or use <code>AUTO CDC</code> in a Lakeflow pipeline.</p>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>A vendor re-sends a corrected file with the same name. Auto Loader ignores it. Why, and what are the options?</summary><div>Auto Loader tracks files by path and treats an overwritten path as already ingested. Ask for new file names on corrections, or set <code>cloudFiles.allowOverwrites=true</code> and make the downstream write idempotent (MERGE on a key), since the whole file is ingested again.</div></details>
+      <details><summary>All your Auto Loader JSON columns are strings. Bug?</summary><div>No: type inference is off by default for JSON and CSV. Set <code>cloudFiles.inferColumnTypes=true</code> or provide schema hints, ideally before the first run so the stored schema starts correct.</div></details>
+      <details><summary>A Silver stream reading a Bronze Delta table fails after someone ran a GDPR DELETE on Bronze. Fix?</summary><div>The Delta source saw a commit that rewrote files. Restart with <code>skipChangeCommits=true</code> so such commits are skipped, and apply the same deletion to Silver separately (or propagate it via the change feed).</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+</body></html>

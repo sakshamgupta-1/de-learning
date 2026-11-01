@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Streaming Sources and Sinks: Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Structured Streaming modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../fundamentals/index.html">1 · Fundamentals</a>
+    <a href="../state/index.html">2 · State &amp; time</a>
+    <a href="../sources-sinks/index.html" aria-current="page">3 · Sources &amp; sinks</a>
+    <a href="../operations/index.html">4 · Operating streams</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Structured Streaming</a><span class="sep">›</span><a href="index.html">Sources &amp; sinks</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Structured Streaming · Module 3 of 4 · Examples</p>
+  <h1>Ingestion patterns in code</h1>
+  <p class="lede">Auto Loader with schema evolution, Kafka with Avro both ways, a change-feed source, writing back to Kafka, and an idempotent MERGE upsert. Paths, topics and table names are examples.</p>
+  <div class="toc">
+    <a href="#autoloader">Auto Loader to Bronze</a><a href="#avro">Kafka + Avro</a><a href="#kafka-sink">Writing to Kafka</a><a href="#change-feed">Change feed source</a><a href="#merge">Idempotent MERGE</a>
+  </div>
+
+  <section id="autoloader">
+    <h2>Auto Loader to Bronze</h2>
+<pre><code>raw = (spark.readStream.format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", "/chk/bronze_orders/_schema")    <span class="muted"># inferred schema, versioned</span>
+    .option("cloudFiles.inferColumnTypes", "true")
+    .option("cloudFiles.schemaHints", "amount DECIMAL(18,2), order_ts TIMESTAMP")
+    .option("cloudFiles.useNotifications", "true")                        <span class="muted"># or managed file events</span>
+    .option("cloudFiles.maxFilesPerTrigger", 2000)
+    .load("s3://landing/orders/"))
+
+(raw.withColumn("_source_file", F.col("_metadata.file_path"))
+    .withColumn("_ingested_at", F.current_timestamp())
+    .writeStream
+    .option("checkpointLocation", "/chk/bronze_orders")
+    .option("mergeSchema", "true")                    <span class="muted"># let the Delta table gain new columns too</span>
+    .trigger(availableNow=True)
+    .toTable("bronze.orders"))</code></pre>
+    <ul>
+      <li>Keep <code>_source_file</code> and <code>_ingested_at</code> in Bronze: they're how you trace and replay later.</li>
+      <li>Watch <code>_rescued_data</code>: a count of non-null rescued rows per batch is a cheap schema-drift alert.</li>
+    </ul>
+  </section>
+
+  <section id="avro">
+    <h2>Kafka with Avro and a schema registry</h2>
+    <h3>Open-source Spark: strip the header, pass the schema</h3>
+<pre><code>from pyspark.sql.avro.functions import from_avro
+
+reader_schema = open("schemas/orders-value.avsc").read()     <span class="muted"># latest schema, fetched from the registry at deploy</span>
+
+orders = (spark.readStream.format("kafka")
+    .option("kafka.bootstrap.servers", brokers)
+    .option("subscribe", "orders")
+    .option("maxOffsetsPerTrigger", 500_000)
+    .load()
+    .select(F.col("key").cast("string").alias("order_key"),
+            from_avro(F.expr("substring(value, 6, length(value) - 5)"),   <span class="muted"># skip magic byte + schema id</span>
+                      reader_schema, {"mode": "PERMISSIVE"}).alias("o"),
+            "partition", "offset", "timestamp")
+    .select("order_key", "o.*", "partition", "offset", "timestamp"))</code></pre>
+    <p>This decodes every message with one reader schema. That's correct for messages written with older, compatible writer schemas only if the reader schema can resolve them, which BACKWARD compatibility guarantees. <code>PERMISSIVE</code> mode turns undecodable messages into nulls instead of failing; route them to a quarantine table.</p>
+    <h3>Databricks: let <code>from_avro</code> use the registry</h3>
+<pre><code>from pyspark.sql.avro.functions import from_avro
+
+orders = (spark.readStream.format("kafka")
+    .option("kafka.bootstrap.servers", brokers).option("subscribe", "orders").load()
+    .select(from_avro(data=F.col("value"),
+                      subject="orders-value",
+                      schemaRegistryAddress="https://registry.example.com",
+                      options={"confluent.schema.registry.basic.auth.credentials.source": "USER_INFO",
+                               "confluent.schema.registry.basic.auth.user.info": secret})
+            .alias("o"))
+    .select("o.*"))</code></pre>
+    <p>The Databricks version reads the schema id in each message and resolves it against the subject's schema, so you don't hard-code a schema. Check your runtime's documentation for the exact options.</p>
+  </section>
+
+  <section id="kafka-sink">
+    <h2>Writing to Kafka</h2>
+<pre><code>(alerts.select(F.col("account_id").cast("string").alias("key"),
+               F.to_json(F.struct("*")).alias("value"))
+       .writeStream.format("kafka")
+       .option("kafka.bootstrap.servers", brokers)
+       .option("topic", "fraud-alerts")
+       .option("checkpointLocation", "/chk/fraud_alerts")
+       .start())</code></pre>
+    <p>At-least-once: a replayed batch is produced again. Give each message a stable id (here the key plus an alert id inside the value) so consumers can deduplicate.</p>
+  </section>
+
+  <section id="change-feed">
+    <h2>Streaming a Delta change feed</h2>
+<pre><code><span class="muted"># source table needs: ALTER TABLE silver.customers SET TBLPROPERTIES (delta.enableChangeDataFeed = true)</span>
+changes = (spark.readStream
+    .option("readChangeFeed", "true")
+    .option("startingVersion", 120)                  <span class="muted"># new checkpoints only</span>
+    .table("silver.customers")
+    .where("_change_type != 'update_preimage'"))     <span class="muted"># keep inserts, post-update images, deletes</span></code></pre>
+    <p>Each row carries <code>_change_type</code>, <code>_commit_version</code> and <code>_commit_timestamp</code>, so a downstream MERGE can apply deletes and order updates.</p>
+  </section>
+
+  <section id="merge">
+    <h2>An idempotent MERGE upsert, with deletes</h2>
+<pre><code>from delta.tables import DeltaTable
+from pyspark.sql import Window
+
+def apply_changes(batch, batch_id):
+    w = Window.partitionBy("customer_id").orderBy(F.desc("_commit_version"))
+    latest = batch.withColumn("rn", F.row_number().over(w)).where("rn = 1").drop("rn")
+    (DeltaTable.forName(spark, "gold.customers").alias("t")
+        .merge(latest.alias("s"), "t.customer_id = s.customer_id")
+        .whenMatchedDelete(condition="s._change_type = 'delete'")
+        .whenMatchedUpdateAll(condition="s._change_type != 'delete' AND s._commit_version &gt; t._commit_version")
+        .whenNotMatchedInsertAll(condition="s._change_type != 'delete'")
+        .execute())
+
+(changes.writeStream.foreachBatch(apply_changes)
+        .option("checkpointLocation", "/chk/gold_customers")
+        .trigger(availableNow=True).start())</code></pre>
+    <ul>
+      <li><b>One row per key</b> before MERGE, keeping the latest change.</li>
+      <li><b>Version guard:</b> the target stores <code>_commit_version</code>, so a replayed or older change never overwrites a newer one. That's what makes the MERGE idempotent.</li>
+      <li>Lakeflow's <code>AUTO CDC</code> implements the same logic declaratively, including out-of-order handling and SCD Type 2.</li>
+    </ul>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+</body></html>
