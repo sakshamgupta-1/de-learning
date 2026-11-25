@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Reading Data in Parallel: Examples</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="../tuning/index.html">5 · Tuning &amp; debug</a>
+    <a href="index.html" aria-current="page">6 · Reading data</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Reading data in parallel</a><span class="sep">›</span><span aria-current="page">Examples</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html" aria-current="page">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Spark Core · Module 6 of 6 · Examples</p>
+  <h1>Splitting reads in code</h1>
+  <p class="lede">See how JDBC ranges fall on real-looking data, then the code for each source: partitioned JDBC reads, quantile and hash predicates, an API fan-out with retries and error rows, Kafka batch reads and a minimal custom data source. Names and URLs are examples.</p>
+  <div class="toc">
+    <a href="#jdbc-calc">JDBC partition calculator</a><a href="#jdbc-code">Partitioned JDBC read</a><a href="#quantiles">Quantile predicates</a><a href="#hash">String keys</a><a href="#api">API fan-out</a><a href="#kafka-batch">Kafka batch read</a><a href="#python-source">Python data source</a>
+  </div>
+
+  <section id="jdbc-calc">
+    <h2>JDBC partition calculator</h2>
+    <p>A table of 20 million orders keyed by <code>order_id</code>, ids from 1 to 50 million. Pick how the ids are distributed (recent-heavy: busy recent periods; gappy: nothing between 10M and 40M; outliers: three test rows with id 999,999,999), set the bounds and partition count, and compare Spark's equal-width ranges with predicates built from quantiles. Each bar is one read task.</p>
+    <div class="calc">
+      <div class="fields">
+        <label for="jdDist">Data distribution<select id="jdDist">
+          <option value="uniform">Even</option>
+          <option value="recent" selected>Recent-heavy</option>
+          <option value="gappy">Gappy (two id ranges)</option>
+          <option value="outlier">Even + 3 outlier ids</option>
+        </select></label>
+        <label for="jdLo">lowerBound<input id="jdLo" type="number" value="1"></label>
+        <label for="jdHi">upperBound<input id="jdHi" type="number" value="50000000"></label>
+        <label for="jdN">numPartitions<input id="jdN" type="number" min="1" max="64" value="8"></label>
+      </div>
+      <div class="ctrl" style="margin-top:.6rem">
+        <div class="seg" role="tablist" aria-label="Split method" id="jdMode" style="margin:0">
+          <button role="tab" aria-selected="true" data-k="eq">Equal width (partitionColumn)</button>
+          <button role="tab" aria-selected="false" data-k="q">Quantile predicates</button>
+        </div>
+        <button class="btn ghost" id="jdMinMax">Bounds = MIN / MAX of the column</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 230" role="img" aria-labelledby="jdT">
+  <title id="jdT">Rows read by each JDBC partition for the chosen distribution, bounds and split method</title>
+  <g id="jdBars"></g>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="out" id="jdOut" aria-live="polite"></div>
+  <pre><code id="jdSql"></code></pre>
+  <p class="note" id="jdNote" aria-live="polite"></p>
+
+  <section id="jdbc-code">
+    <h2>A partitioned JDBC read</h2>
+<pre><code>orders = (spark.read.format("jdbc")
+    .option("url", "jdbc:postgresql://replica.db:5432/sales")     <span class="muted"># a replica, not the primary</span>
+    .option("dbtable", "(SELECT order_id, customer_id, amount, created_at FROM orders) o")
+    .option("user", user).option("password", password)            <span class="muted"># from a secret store</span>
+    .option("partitionColumn", "order_id")
+    .option("lowerBound", 1).option("upperBound", 50_000_000)
+    .option("numPartitions", 16)
+    .option("fetchsize", 10_000)
+    .option("customSchema", "amount DECIMAL(18,2)")
+    .load()
+    .where("created_at &gt;= '2026-01-01'"))                          <span class="muted"># pushed into every query</span>
+
+orders.explain()      <span class="muted"># JDBCScan … PushedFilters: [IsNotNull(created_at), GreaterThanOrEqual(created_at,…)]</span></code></pre>
+    <p>Select only the columns you need in <code>dbtable</code>: column pruning cuts network transfer as much as filters cut rows.</p>
+  </section>
+
+  <section id="quantiles">
+    <h2>Quantile predicates for skewed keys</h2>
+    <p>Ask the database for the boundaries once (cache them if the distribution is stable), then pass one predicate per partition:</p>
+<pre><code>N = 16
+bounds_sql = f"""(SELECT bucket, MIN(order_id) AS lo FROM (
+                   SELECT order_id, NTILE({N}) OVER (ORDER BY order_id) AS bucket FROM orders) x
+                 GROUP BY bucket ORDER BY bucket) b"""
+los = [r.lo for r in spark.read.jdbc(url, bounds_sql, properties=props).orderBy("bucket").collect()]
+
+preds = [f"order_id &lt; {los[1]}"] + \
+        [f"order_id &gt;= {los[i]} AND order_id &lt; {los[i+1]}" for i in range(1, N - 1)] + \
+        [f"order_id &gt;= {los[N-1]} OR order_id IS NULL"]           <span class="muted"># every row exactly once</span>
+
+orders = spark.read.jdbc(url, "orders", predicates=preds, properties={**props, "fetchsize": "10000"})</code></pre>
+    <ul>
+      <li>The boundary query sorts by an indexed column, which most databases do from the index, but it still touches every key. On huge tables use the database's statistics (histograms) or a sample.</li>
+      <li>The first and last predicates are open-ended, and NULLs go to one of them, so no row is lost.</li>
+    </ul>
+  </section>
+
+  <section id="hash">
+    <h2>String or UUID keys: hash predicates</h2>
+<pre><code><span class="muted"># Oracle shown; PostgreSQL: abs(hashtext(id::text)) % 16, SQL Server: ABS(CHECKSUM(id)) % 16</span>
+preds = [f"MOD(ORA_HASH(customer_uuid), 16) = {i}" for i in range(16)]
+customers = spark.read.jdbc(url, "customers", predicates=preds, properties=props)</code></pre>
+    <p>Hash predicates spread rows evenly, but each query has to evaluate the hash on every row: 16 full scans. Fine on a replica for medium tables; for large ones, add a function-based index on the expression or partition on a different, indexed column.</p>
+  </section>
+
+  <section id="api">
+    <h2>API fan-out with retries and error rows</h2>
+<pre><code>import time
+import pandas as pd
+from pyspark.sql import functions as F
+
+TOKEN = dbutils.secrets.get("api", "token")      <span class="muted"># read on the driver; shipped with the function, never log it</span>
+BASE = "https://api.example.com/v1/items"
+
+def fetch_pages(batches):
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    s = requests.Session()
+    s.mount("https://", HTTPAdapter(max_retries=Retry(
+        total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])))   <span class="muted"># honours Retry-After</span>
+    s.headers["Authorization"] = f"Bearer {TOKEN}"
+    try:
+        for pdf in batches:
+            rows = []
+            for p in pdf["page"]:
+                try:
+                    r = s.get(BASE, params={"page": int(p)}, timeout=15)
+                    rows.append((int(p), r.status_code, r.text if r.ok else None,
+                                 None if r.ok else r.text[:500], time.time()))
+                except Exception as e:                     <span class="muted"># still failing after retries: record it, don't fail the task</span>
+                    rows.append((int(p), -1, None, str(e)[:500], time.time()))
+            yield pd.DataFrame(rows, columns=["page", "status", "body", "error", "fetched_at"])
+    finally:
+        s.close()
+
+raw = (spark.range(1, 501).withColumnRenamed("id", "page")
+            .repartition(10)                                <span class="muted"># 10 concurrent callers (if 10 task slots are free)</span>
+            .mapInPandas(fetch_pages, "page long, status int, body string, error string, fetched_at double"))
+raw.write.mode("append").saveAsTable("bronze.api_items_raw")   <span class="muted"># call once; everything downstream reads this</span>
+
+items = (spark.table("bronze.api_items_raw").where("status = 200")
+    .select(F.explode(F.from_json("body",
+        "struct&lt;data:array&lt;struct&lt;id:string,name:string,status:string&gt;&gt;&gt;").data).alias("i"))
+    .select(F.col("i.id").cast("int").alias("id"), "i.name", "i.status")
+    .dropDuplicates(["id"]))                                   <span class="muted"># offset paging can repeat rows</span></code></pre>
+    <ul>
+      <li><b>Classic compute</b> can use <code>pages_df.rdd.mapPartitions(fn)</code> with the same body; <code>mapInPandas</code> also works on serverless and Spark Connect, where RDDs don't exist.</li>
+      <li><b>Pages that failed</b> (<code>status != 200</code>) are retried by a second run over just those page numbers.</li>
+      <li><b>Speculation off</b> for this job (<code>spark.speculation=false</code>, the open-source default) so slow tasks don't call the API twice.</li>
+    </ul>
+  </section>
+
+  <section id="kafka-batch">
+    <h2>Kafka batch read for a backfill</h2>
+<pre><code>backfill = (spark.read.format("kafka")
+    .option("kafka.bootstrap.servers", brokers)
+    .option("subscribe", "orders")
+    .option("startingOffsetsByTimestamp", '{"orders":{"0":1761955200000,"1":1761955200000,"2":1761955200000}}')
+    .option("endingOffsets", "latest")
+    .option("minPartitions", 48)                 <span class="muted"># 3 partitions, but 48 read tasks</span>
+    .load()
+    .select(F.col("value").cast("string").alias("json"), "partition", "offset", "timestamp"))</code></pre>
+  </section>
+
+  <section id="python-source">
+    <h2>A minimal Python data source (Spark 4.0+)</h2>
+    <p>The same API fan-out, packaged so other jobs can use <code>spark.read.format("pagedapi")</code>. You decide the partitions; Spark runs <code>read</code> for each on an executor.</p>
+<pre><code>from pyspark.sql.datasource import DataSource, DataSourceReader, InputPartition
+
+class PageRange(InputPartition):
+    def __init__(self, start, end):
+        self.start, self.end = start, end
+
+class PagedApiReader(DataSourceReader):
+    def __init__(self, options):
+        self.options = options
+
+    def partitions(self):                                   <span class="muted"># runs on the driver</span>
+        pages, per = int(self.options["pages"]), int(self.options.get("pagesPerPartition", 50))
+        return [PageRange(s, min(s + per, pages + 1)) for s in range(1, pages + 1, per)]
+
+    def read(self, partition):                              <span class="muted"># runs on executors, one call per partition</span>
+        import requests
+        with requests.Session() as s:
+            for p in range(partition.start, partition.end):
+                r = s.get(self.options["url"], params={"page": p}, timeout=15)
+                yield (p, r.status_code, r.text)
+
+class PagedApi(DataSource):
+    @classmethod
+    def name(cls):
+        return "pagedapi"
+    def schema(self):
+        return "page int, status int, body string"
+    def reader(self, schema):
+        return PagedApiReader(self.options)
+
+spark.dataSource.register(PagedApi)
+df = spark.read.format("pagedapi").option("url", BASE).option("pages", 500).load()</code></pre>
+  </section>
+
+  <nav class="next">
+    <a href="deep-dive.html"><span>Back</span><b>Deep dive</b></a>
+    <a href="production.html"><span>Next</span><b>Production issues</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg";
+function el(tag,a,p,txt){const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;p.appendChild(e);return e}
+const TOTAL=20e6,DOM=50e6,NB=1000,BW=DOM/NB;
+const fmt=n=>Math.round(n).toLocaleString("en-US"),fm=n=>n>=1e6?(n/1e6).toFixed(n>=1e7?0:1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":Math.round(n)+"";
+function hist(kind){const w=new Array(NB).fill(0);
+  for(let i=0;i<NB;i++){const x=(i+.5)/NB;
+    w[i]=kind==="recent"?Math.exp(5*x):kind==="gappy"?(x<0.2?3:x>=0.8?2:0):1}
+  const s=w.reduce((a,b)=>a+b,0);return {b:w.map(v=>v/s*TOTAL),pts:kind==="outlier"?[[999999999,3]]:[],max:kind==="outlier"?999999999:(kind==="gappy"?50e6:50e6),min:1}}
+let H=hist("recent"),mode="eq";
+function rows(a,b){let r=0;for(let i=0;i<NB;i++){const lo=i*BW,hi=lo+BW,o=Math.max(0,Math.min(b,hi)-Math.max(a,lo));if(o>0)r+=H.b[i]*o/BW}
+  H.pts.forEach(([k,c])=>{if(k>=a&&k<b)r+=c});return r}
+function quantKey(q){let acc=0;const target=q*TOTAL;for(let i=0;i<NB;i++){if(acc+H.b[i]>=target&&H.b[i]>0)return Math.round(i*BW+(target-acc)/H.b[i]*BW);acc+=H.b[i]}return DOM}
+function calc(){
+  let lo=Math.floor(+$("jdLo").value||0),hi=Math.floor(+$("jdHi").value||0),n=Math.max(1,Math.min(64,Math.floor(+$("jdN").value||1)));
+  let cuts=[],note="";
+  if(mode==="eq"){
+    if(hi<=lo){$("jdNote").textContent="upperBound must be greater than lowerBound.";return}
+    if(n>hi-lo)n=hi-lo;
+    const stride=Math.floor(hi/n)-Math.floor(lo/n);
+    for(let i=1;i<n;i++)cuts.push(lo+i*stride);
+  } else for(let i=1;i<n;i++)cuts.push(quantKey(i/n));
+  const edges=[-Infinity,...cuts,Infinity],R=[];for(let i=0;i<n;i++)R.push(rows(edges[i],edges[i+1]));
+  const max=Math.max(...R),mean=TOTAL/n,sorted=[...R].sort((a,b)=>a-b),med=sorted[Math.floor(n/2)];
+  /* bars */
+  const g=$("jdBars");g.innerHTML="";const W=800,X0=40,bw=W/n,top=20,Hh=170;
+  R.forEach((r,i)=>{const h=max>0?r/max*Hh:0,bad=r>=1.5*mean;el("rect",{class:bad?"bxr":"bxb",x:X0+i*bw+1,y:top+Hh-h,width:Math.max(1,bw-2),height:Math.max(h,1),rx:2},g);
+    if(n<=16)el("text",{class:"tm",x:X0+i*bw+bw/2,y:top+Hh-h-5,"text-anchor":"middle"},g,fm(r))});
+  el("line",{class:"lnb dash",x1:X0,y1:top+Hh-mean/max*Hh,x2:X0+W,y2:top+Hh-mean/max*Hh},g);
+  el("text",{class:"tm",x:X0+W,y:top+Hh-mean/max*Hh-5,"text-anchor":"end"},g,"even share: "+fm(mean));
+  el("text",{class:"tm",x:X0,y:214},g,"task 1");el("text",{class:"tm",x:X0+W,y:214,"text-anchor":"end"},g,"task "+n);
+  $("jdOut").innerHTML=[[fm(max),"rows in the largest task"],[fm(med),"median task"],[(max/mean).toFixed(1)+"×","stage time vs a perfectly even split"],[R.filter(r=>r<1).length,"tasks that read nothing"]].map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("");
+  /* sql */
+  const c=x=>fmt(x).replace(/,/g,"_"),w=[];
+  for(let i=0;i<n;i++){const a=edges[i],b=edges[i+1];
+    w.push(i===0?`order_id < ${c(b)}${mode==="eq"?" OR order_id IS NULL":""}`:i===n-1?`order_id >= ${c(a)}${mode==="q"?" OR order_id IS NULL":""}`:`order_id >= ${c(a)} AND order_id < ${c(b)}`)}
+  const shown=n<=6?w:[...w.slice(0,3),"…",...w.slice(-2)];
+  $("jdSql").textContent=shown.map((x,i)=>x==="…"?"…":"WHERE "+x).join("\n");
+  const k=$("jdDist").value;
+  if(mode==="q")note="Quantile boundaries give every task about the same number of rows, whatever the distribution. The cost is one extra query to find the boundaries, and the predicates must be passed explicitly.";
+  else if(k==="outlier"&&hi>1e8)note="Three test rows with id 999,999,999 made MAX(order_id) huge. With bounds from MIN/MAX, the ranges are about "+fm((hi-lo)/n)+" ids wide, so all real orders fall in the first range: one task reads everything. Fix the bounds, filter the outliers, or use quantile predicates.";
+  else if(k==="recent")note="Ids are allocated over time and recent periods are much busier, so the high-id ranges hold most rows. Equal width isn't equal work.";
+  else if(k==="gappy")note="No ids exist between 10M and 40M (a migration, a retired id range), so the middle ranges read nothing and the edge ranges read everything.";
+  else if(k==="outlier")note="With sensible bounds, the 3 outlier rows simply land in the last, open-ended range. Now try 'Bounds = MIN / MAX'.";
+  else note="With evenly spread ids, equal-width ranges are already balanced: partitionColumn is all you need.";
+  $("jdNote").textContent=note}
+document.querySelectorAll("#jdMode button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("#jdMode button").forEach(x=>x.setAttribute("aria-selected",x===b));mode=b.dataset.k;calc()}));
+$("jdDist").addEventListener("change",()=>{H=hist($("jdDist").value);$("jdLo").value=1;$("jdHi").value=50000000;calc()});
+$("jdMinMax").addEventListener("click",()=>{$("jdLo").value=H.min;$("jdHi").value=H.max;calc()});
+["jdLo","jdHi","jdN"].forEach(id=>$(id).addEventListener("input",calc));
+calc();
+})();
+</script>
+</body></html>

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Reading Data in Parallel: Production Issues</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="../tuning/index.html">5 · Tuning &amp; debug</a>
+    <a href="index.html" aria-current="page">6 · Reading data</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Reading data in parallel</a><span class="sep">›</span><span aria-current="page">Production issues</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html" aria-current="page">Production issues</a>
+  </nav>
+  <p class="eyebrow">Spark Core · Module 6 of 6 · Production issues</p>
+  <h1>When the read is the bottleneck</h1>
+  <p class="lede">Eight ways the first stage of a job goes wrong, across databases, files and APIs. Each follows symptom → why → confirm → fix → prevent → interview answer.</p>
+  <div class="toc">
+    <a href="#one-task">JDBC read as one task</a><a href="#range-skew">One task reads most rows</a><a href="#db-overload">Source database overloaded</a><a href="#slow-fetch">Slow despite many partitions</a><a href="#inconsistent">Missing or duplicate rows</a><a href="#unsplittable">Giant gzip files</a><a href="#api-limits">API job fails or gets throttled</a><a href="#api-recalls">API called again and again</a>
+  </div>
+
+  <section id="one-task">
+    <h2>A JDBC read runs as one task</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Extracting a large table takes hours; the scan stage has 1 task while the rest of the cluster idles. Later stages may OOM on the single huge partition.</p>
+      <h3>Why it happens</h3><p>Without <code>partitionColumn</code>/bounds/<code>numPartitions</code> or <code>predicates</code>, Spark issues one query on one connection.</p>
+      <h3>How to confirm</h3><ol><li>The scan stage in the Spark UI shows 1 task; <code>df.rdd.getNumPartitions()</code> is 1.</li><li>The database shows one session running the query.</li></ol>
+      <h3>Fix</h3><ul><li>Add a partition column with bounds, or quantile <code>predicates</code> (<a href="examples.html#quantiles">example</a>).</li><li>For very large tables, export to files and read those instead.</li></ul>
+      <h3>Prevent</h3><ul><li>A shared JDBC read helper that requires a partitioning strategy for tables above a size threshold.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A JDBC read is single-threaded by default. I always give Spark a partitioning strategy, a numeric or date column with bounds, or explicit predicates, and for very large tables I prefer an export to files."</div>
+    </div>
+  </section>
+
+  <section id="range-skew">
+    <h2>One task reads most of the table</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>The JDBC read has 16 tasks, 15 finish in a minute, one runs for an hour.</p>
+      <h3>Why it happens</h3><p>Ranges are equal width, not equal rows. Busy recent periods, gaps in the id space, or outlier keys (bounds taken from <code>MIN/MAX</code> with a test row at 999,999,999) concentrate rows in one range.</p>
+      <h3>How to confirm</h3><ol><li>Task input rows in the stage's summary metrics: max far above median.</li><li><code>SELECT width_bucket(id, lo, hi, N), count(*) … GROUP BY 1</code> on the source shows the imbalance.</li></ol>
+      <h3>Fix</h3><ul><li>Quantile predicates; or bounds from percentiles instead of MIN/MAX; or partition on a better-spread column (a date for time-ordered data, a hash for strings).</li></ul>
+      <h3>Prevent</h3><ul><li>Compute boundaries from the data (or database statistics) instead of hard-coding bounds; review them when volumes shift.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Spark's JDBC ranges are equal width, so skewed or gappy keys give skewed tasks. I compute quantile boundaries and pass them as predicates so each task reads about the same number of rows."</div>
+    </div>
+  </section>
+
+  <section id="db-overload">
+    <h2>The source database is overloaded</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>The DBA reports CPU or I/O spikes, lock waits or "too many connections" during the extract; the application on that database slows down.</p>
+      <h3>Why it happens</h3><p><code>numPartitions</code> queries run at once, each possibly a full table scan if the partition column or hash expression isn't indexed. Running it against the primary competes with production traffic.</p>
+      <h3>How to confirm</h3><ol><li>Database sessions from Spark's user during the run; execution plans of the generated range queries.</li></ol>
+      <h3>Fix</h3><ul><li>Read from a replica; lower <code>numPartitions</code> to an agreed connection budget; index the partition column; run outside peak hours.</li><li>Switch to incremental extracts, or a CDC feed, instead of full reads.</li></ul>
+      <h3>Prevent</h3><ul><li>Agree a connection and time budget with the source owner; prefer exports or CDC for large or frequent extracts.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"numPartitions is a connection count, not just a Spark setting. I read from a replica with an agreed concurrency, make sure each range query uses an index, and move frequent large extracts to CDC or exports."</div>
+    </div>
+  </section>
+
+  <section id="slow-fetch">
+    <h2>Slow even with many partitions</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Plenty of tasks, the database is idle, but each task crawls; executors show little CPU.</p>
+      <h3>Why it happens</h3><p>Network round trips dominate: a small driver default <code>fetchsize</code> (Oracle fetches 10 rows per trip) means millions of trips. Wide rows with columns you don't need make it worse.</p>
+      <h3>How to confirm</h3><ol><li>Task time is long but rows per second per task are low; network wait on the database side.</li></ol>
+      <h3>Fix</h3><ul><li>Set <code>fetchsize</code> to thousands or tens of thousands; select only needed columns in <code>dbtable</code>; push filters down (check <code>PushedFilters</code>).</li></ul>
+      <h3>Prevent</h3><ul><li>Default <code>fetchsize</code> in your JDBC read helper; review the projected columns.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"If tasks are many but slow and the database is idle, it's round trips: I raise fetchsize, project only the needed columns, and make sure filters are pushed down."</div>
+    </div>
+  </section>
+
+  <section id="inconsistent">
+    <h2>Missing or duplicate rows after a parallel read</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Row counts don't match the source; some keys appear twice, others are missing, usually only on busy tables.</p>
+      <h3>Why it happens</h3><p>Each partition is a separate query at a different moment. Rows whose partition column changes between queries are read twice or not at all; inserts and deletes during the read land unevenly. Overlapping or incomplete <code>predicates</code> do the same deterministically.</p>
+      <h3>How to confirm</h3><ol><li>Duplicated keys have a recently changed partition column; or the predicates overlap or leave gaps (check boundary conditions and NULLs).</li></ol>
+      <h3>Fix</h3><ul><li>Partition on an immutable column; read from a snapshot or a replica at a fixed point; fix predicate boundaries; dedupe on the key.</li></ul>
+      <h3>Prevent</h3><ul><li>Reconcile counts against the source for each extract; never partition on <code>updated_at</code> or status columns.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"A parallel JDBC read is N queries at N moments, so it isn't a consistent snapshot. I partition on an immutable key, read from a snapshot or replica, and reconcile counts after the load."</div>
+    </div>
+  </section>
+
+  <section id="unsplittable">
+    <h2>Giant gzip files</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>A daily file drop of a few 20 GB <code>.csv.gz</code> files reads with one task per file; those tasks take an hour and may spill or OOM downstream.</p>
+      <h3>Why it happens</h3><p>Gzip can't be split, so each file is read by one task and lands in one partition.</p>
+      <h3>How to confirm</h3><ol><li>Scan stage task count equals file count; task input size equals file size.</li></ol>
+      <h3>Fix</h3><ul><li>Ask the producer for many smaller files, or a splittable format (Parquet, or bzip2 if it must be text).</li><li>Until then, <code>repartition()</code> right after reading so later stages use the whole cluster; land the data once as Parquet or Delta and read that afterwards.</li></ul>
+      <h3>Prevent</h3><ul><li>Agree file format and size limits in the source's data contract.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Gzip isn't splittable, so each file is one task. I repartition after the read to protect later stages, convert once to Parquet or Delta, and get the producer to send smaller or splittable files."</div>
+    </div>
+  </section>
+
+  <section id="api-limits">
+    <h2>The API job fails or gets throttled</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>Many HTTP 429 responses, long backoffs, or the whole job failing after hours because a handful of pages returned errors.</p>
+      <h3>Why it happens</h3><p>Concurrency (partitions running at once) times calls per task exceeds the API's rate limit; and <code>raise_for_status()</code> turns one bad page into a failed task, which Spark retries (re-calling every page in that partition) and finally fails the job.</p>
+      <h3>How to confirm</h3><ol><li>Status code counts per run; task failures with HTTP errors in the stage's error column.</li></ol>
+      <h3>Fix</h3><ul><li>Size partitions to the rate limit; retries with exponential backoff that honour <code>Retry-After</code>.</li><li>Return failures as rows (status, error) instead of raising; re-run only failed requests.</li></ul>
+      <h3>Prevent</h3><ul><li>Record rate limits in the source's documentation, alert on error-row counts, and test with production-sized request lists.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Partition count is the API concurrency, so I size it to the rate limit, retry with backoff on 429s, and return errors as rows so one bad page never fails the whole job. Then I rerun just the failed requests."</div>
+    </div>
+  </section>
+
+  <section id="api-recalls">
+    <h2>The API is called again and again</h2>
+    <div class="issue">
+      <h3>Symptom</h3><p>The provider reports several times more calls than pages; costs or quotas run out; numbers differ between steps of the same job.</p>
+      <h3>Why it happens</h3><p>The API-calling DataFrame is lazy: every action (<code>count</code>, <code>display</code>, each write) re-runs the calls. Task retries and speculative tasks add more.</p>
+      <h3>How to confirm</h3><ol><li>Count the jobs in the Spark UI that include the <code>mapInPandas</code> or <code>mapPartitions</code> stage.</li></ol>
+      <h3>Fix</h3><ul><li>Write raw responses to a Bronze table in one action, and build everything downstream from that table.</li><li>Keep speculation off for API jobs.</li></ul>
+      <h3>Prevent</h3><ul><li>Code review rule: anything with side effects or external calls is written out once, never re-derived.</li></ul>
+      <div class="callout say"><div class="lbl">Say it in an interview</div>"Because Spark is lazy, an API-calling DataFrame calls the API again on every action. I land the raw responses in one write and work from the table, with speculation off."</div>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="examples.html"><span>Back</span><b>Examples</b></a>
+    <a href="index.html"><span>Module 6</span><b>Overview</b></a>
+  </nav>
+</div></main>
+</body></html>
