@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Reading Data in Parallel</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="index.html" aria-current="page">5 · Reading data</a>
+    <a href="../tuning/index.html">6 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><span aria-current="page">Reading data in parallel</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="deep-dive.html">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Spark Core · Module 5 of 6 · Overview</p>
+  <h1>Reading data in parallel</h1>
+  <p class="lede">A Spark job is only as parallel as its first stage, and the first stage's tasks are decided by the source: file splits, JDBC ranges, Kafka partitions or the API calls you fan out. Know who decides the partitions for each source and what makes them uneven, and most "the read is slow" questions answer themselves. A 10-minute refresher.</p>
+  <div class="toc">
+    <a href="#who-decides">Who decides</a><a href="#sources">Source by source</a><a href="#files">Files</a><a href="#jdbc">Databases</a><a href="#kafka">Kafka</a><a href="#apis">APIs</a><a href="#strategy">Choosing a strategy</a><a href="#facts">Key facts</a><a href="#say">Interview answers</a><a href="#check">Quick check</a><a href="#deeper">Go deeper</a>
+  </div>
+
+  <section id="who-decides">
+    <h2>Who decides how many read tasks there are?</h2>
+    <p>Every later stage can be resized with a shuffle, but the <b>scan stage</b> gets exactly as many tasks as the source offers <b>input partitions</b>. Each source has its own rule: files are split by size, a JDBC table by the ranges you configure (one, if you configure none), Kafka by topic partition, and an API by the request list you build. If the source gives one big partition, one task does all the reading, however big the cluster.</p>
+    <p>Two problems follow from that rule. <b>Too few partitions</b> leave cores idle. <b>Uneven partitions</b>, from skewed key ranges, a giant gzip file or a hot Kafka partition, leave one task running long after the rest. The fixes happen at the source boundary: how you split the read, not how you tune the stages after it.</p>
+  </section>
+
+  <section id="sources">
+    <h2>Source by source</h2>
+    <p>The same idea for four sources: source units on the left, the read tasks they become on the right. Red marks the unit that holds the stage up.</p>
+    <div class="seg" role="tablist" aria-label="Source" id="srcTabs">
+      <button role="tab" aria-selected="true" data-k="files">Files</button>
+      <button role="tab" aria-selected="false" data-k="jdbc">Database (JDBC)</button>
+      <button role="tab" aria-selected="false" data-k="kafka">Kafka</button>
+      <button role="tab" aria-selected="false" data-k="api">REST API</button>
+    </div>
+  </section>
+</div>
+
+<div class="wide"><div class="fig">
+<svg viewBox="0 0 860 300" role="img" aria-labelledby="srcT">
+  <title id="srcT">Source units mapped to read tasks for files, a JDBC table, Kafka partitions or API pages</title>
+  <text class="th" x="20" y="24" id="srcL">Source units</text><text class="th" x="560" y="24">Read tasks</text>
+  <g id="srcLines"></g><g id="srcBoxes"></g>
+</svg>
+</div></div>
+
+<div class="wrap">
+  <div class="out" id="srcOut" aria-live="polite"></div>
+  <p class="note" id="srcNote" aria-live="polite"></p>
+
+  <section id="files">
+    <h2>Files</h2>
+    <ul>
+      <li><b>Splits:</b> Spark cuts files into splits of up to <code>spark.sql.files.maxPartitionBytes</code> (128 MB) and packs small files together, charging <code>openCostInBytes</code> (4 MB) per file. One split, one task.</li>
+      <li><b>Splittable or not:</b> Parquet, ORC, uncompressed or bzip2 CSV/JSON lines can be split. <b>Gzip</b> files, and <code>multiLine</code> JSON or CSV, can't: each is one task, whatever its size.</li>
+      <li><b>Uneven layouts:</b> one huge partition folder, a few giant files among small ones, or Parquet written with very large row groups (a Parquet split is assigned whole row groups).</li>
+    </ul>
+  </section>
+
+  <section id="jdbc">
+    <h2>Databases (JDBC)</h2>
+    <p>A plain <code>spark.read.jdbc(url, "orders")</code> runs <b>one query on one connection in one task</b>. To read in parallel, give Spark a way to split the table:</p>
+<pre><code>orders = (spark.read.format("jdbc")
+    .option("url", url).option("dbtable", "sales.orders")
+    .option("partitionColumn", "order_id")         <span class="muted"># numeric, date or timestamp; ideally indexed</span>
+    .option("lowerBound", 1).option("upperBound", 50_000_000)
+    .option("numPartitions", 16)                    <span class="muted"># 16 queries, 16 connections at once</span>
+    .option("fetchsize", 10_000)                    <span class="muted"># rows per network round trip</span>
+    .load())</code></pre>
+    <ul>
+      <li>Spark cuts <code>[lowerBound, upperBound)</code> into <code>numPartitions</code> ranges of <b>equal width</b>. The bounds <b>don't filter</b>: the first range also takes everything below it (and NULLs), the last everything above.</li>
+      <li>Equal width is not equal rows. Clustered ids, gaps or a few outliers (a test row with id 99,999,999) make one task read most of the table. Pass a <code>predicates</code> list with your own ranges instead: <a href="examples.html#jdbc-calc">see the calculator</a>.</li>
+      <li><code>numPartitions</code> is also the number of <b>concurrent connections</b> to the database. Read from a replica, and agree the number with the DBA.</li>
+      <li>Each partition is its own query, possibly at a different moment: rows can move between ranges mid-read. For a consistent copy, read a snapshot, a replica or an export.</li>
+    </ul>
+  </section>
+
+  <section id="kafka">
+    <h2>Kafka (batch reads)</h2>
+    <p><code>spark.read.format("kafka")</code> with <code>startingOffsets</code> and <code>endingOffsets</code> reads a fixed offset range: by default <b>one task per topic partition</b>. A hot partition makes one long task; <code>minPartitions</code> splits large offset ranges across more tasks. Streaming reads follow the same mapping per micro-batch, covered in the Structured Streaming path.</p>
+  </section>
+
+  <section id="apis">
+    <h2>REST APIs</h2>
+    <p>Spark has no built-in parallel API reader. A loop on the driver is serial. To parallelise, build a DataFrame of <b>request parameters</b> (pages, ids, dates), repartition it to the concurrency the API allows, and call the API inside each task with <code>mapInPandas</code> (or <code>rdd.mapPartitions</code> on classic compute). Land the raw responses in Bronze straight away: the read is lazy, so every action would otherwise call the API again.</p>
+<pre><code>raw = (spark.range(1, 501).withColumnRenamed("id", "page")
+            .repartition(10)                            <span class="muted"># 10 concurrent callers = 10 partitions</span>
+            .mapInPandas(fetch_pages, "page long, status int, body string, error string"))
+raw.write.mode("append").saveAsTable("bronze.api_raw")</code></pre>
+    <p class="small muted">Full version with retries, rate limiting and error rows: <a href="examples.html#api">examples</a>. A reusable connector can be written with Spark 4.0's Python data source API.</p>
+  </section>
+
+  <section id="strategy">
+    <h2>Choosing a read strategy</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Situation</th><th>Strategy</th></tr></thead>
+      <tbody>
+        <tr><td>Small or medium table, database can take the load</td><td>JDBC with <code>partitionColumn</code> or <code>predicates</code>, from a replica</td></tr>
+        <tr><td>Very large table, or a fragile production database</td><td>Database-native export to files (or a bulk-unload tool), then a parallel file read</td></tr>
+        <tr><td>Same table every day</td><td>Incremental extract on a watermark column (<code>updated_at &gt; last_run</code>), or CDC into Kafka / Delta</td></tr>
+        <tr><td>Occasional queries, data stays at the source</td><td>Federation (Databricks Lakehouse Federation, Trino): queries pushed to the source</td></tr>
+        <tr><td>Cloud warehouse (Snowflake, BigQuery)</td><td>The vendor's Spark connector: it unloads in parallel or reads through a storage API</td></tr>
+        <tr><td>REST API</td><td>Fan out request parameters across tasks; land raw; or an ingestion tool that lands files</td></tr>
+        <tr><td>Event streams</td><td>Kafka source, batch or streaming; parallelism set by topic partitions</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="facts">
+    <h2>Key facts</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Setting or fact</th><th class="num">Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>spark.sql.files.maxPartitionBytes</code></td><td class="num">128 MB</td></tr>
+        <tr><td><code>spark.sql.files.openCostInBytes</code></td><td class="num">4 MB</td></tr>
+        <tr><td>Gzip, <code>multiLine</code> JSON/CSV</td><td class="num">not splittable</td></tr>
+        <tr><td>JDBC read without partitioning options</td><td class="num">1 task</td></tr>
+        <tr><td><code>partitionColumn</code> types</td><td class="num">numeric, date, timestamp</td></tr>
+        <tr><td>JDBC <code>lowerBound</code> / <code>upperBound</code></td><td class="num">split only, never filter</td></tr>
+        <tr><td>JDBC <code>numPartitions</code></td><td class="num">also max concurrent connections</td></tr>
+        <tr><td>JDBC <code>fetchsize</code></td><td class="num">driver default (Oracle: 10 rows)</td></tr>
+        <tr><td>Kafka batch read</td><td class="num">1 task per topic partition</td></tr>
+        <tr><td>API fan-out concurrency</td><td class="num">= partitions of the request DataFrame</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="say">
+    <h2>Say it in an interview</h2>
+    <div class="callout say"><div class="lbl">The principle</div>"The scan stage's parallelism comes from the source, not the cluster: file splits, JDBC ranges, Kafka partitions, or the request list I fan out to an API. So I make sure the source is split into enough, evenly sized pieces, because a shuffle afterwards can't speed up a read that one task is doing."</div>
+    <div class="callout say"><div class="lbl">JDBC</div>"A JDBC read is one query on one connection unless I set partitionColumn, bounds and numPartitions, or pass predicates. The ranges are equal width, so with skewed or gappy keys I compute quantile boundaries and pass them as predicates. numPartitions is also the connection count, so I read from a replica, set fetchsize, and for big tables I'd rather export to files and read those."</div>
+    <div class="callout say"><div class="lbl">APIs</div>"I build a DataFrame of request parameters, repartition it to the concurrency the API's rate limit allows, and call the API in mapInPandas with retries and backoff. Failures come back as rows, not exceptions, and I land the raw responses in Bronze immediately, because the read is lazy and would call the API again on every action."</div>
+  </section>
+
+  <section id="check">
+    <h2>Quick check</h2>
+    <div class="qa">
+      <details><summary>A JDBC read of a 200 million row table runs as a single task on a 64-core cluster. Why?</summary><div>No partitioning options were set, so Spark issued one query on one connection. Set <code>partitionColumn</code>, bounds and <code>numPartitions</code>, or pass <code>predicates</code>.</div></details>
+      <details><summary>You set <code>lowerBound=1, upperBound=1000</code> on a table with ids up to 10 million. Are rows above 1,000 lost?</summary><div>No. The bounds only shape the ranges; the last partition reads everything above its start. But nearly all rows land in that last partition, so the read is effectively single-task.</div></details>
+      <details><summary>A folder of 50 gzip CSV files, 4 GB each, reads with only 50 tasks. Can <code>maxPartitionBytes</code> help?</summary><div>No: gzip can't be split, so each file is one task. Recompress as a splittable format (Parquet with snappy or zstd, or bzip2), or repartition right after reading so later stages use the cluster.</div></details>
+      <details><summary>Your API job repartitions 500 page numbers into 10 partitions on a 4-core cluster. How many calls run at once?</summary><div>Four: only 4 task slots exist, so at most 4 partitions run concurrently. Concurrency is the smaller of the partition count and free task slots.</div></details>
+      <details><summary>Why can the same JDBC read return a row twice, or miss one?</summary><div>Each partition is a separate query. If a row's partition column changes between the queries, it can be read by two ranges or by none. Read from a snapshot, a replica at a fixed point, or an export.</div></details>
+    </div>
+  </section>
+
+  <section id="deeper">
+    <h2>Go deeper</h2>
+    <div class="paths">
+      <a class="mod" href="deep-dive.html"><span class="n">Deep dive</span><b>How each source is split</b><p>How file splits are sized and packed, exactly how JDBC ranges are generated, pushdown and fetch options, Kafka offset ranges, API patterns and pagination, warehouse connectors, consistency and incremental extracts.</p></a>
+      <a class="mod" href="examples.html"><span class="n">Examples</span><b>Splitting reads in code</b><p>A JDBC partition calculator with skewed and gappy data, quantile predicates, an API fan-out with retries and error rows, Kafka batch reads and a minimal Python data source.</p></a>
+      <a class="mod" href="production.html"><span class="n">Production issues</span><b>When the read is the bottleneck</b><p>Single-task JDBC reads, one task reading most of a table, overloaded source databases, slow fetches, inconsistent snapshots, gzip files, API rate limits and repeated API calls.</p></a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Mark this module's topics</h2>
+    <div class="tgroup" id="mine"></div>
+  </section>
+
+  <nav class="next">
+    <a href="../optimizer/index.html"><span>Previous · Module 4</span><b>Catalyst, joins &amp; AQE</b></a>
+    <a href="../tuning/index.html"><span>Next · Module 6</span><b>Performance tuning &amp; debugging</b></a>
+  </nav>
+</div></main>
+<script>
+(function(){
+const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg";
+function el(tag,a,p,txt){const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;p.appendChild(e);return e}
+const D={
+ files:{left:"Files in the folder",src:[["a.parquet · 300 MB","bx"],["b.parquet · 40 MB","bx"],["c.parquet · 20 MB","bx"],["d.parquet · 10 MB","bx"],["e.csv.gz · 2 GB","bxr"]],
+  tasks:[["Task 1 · a, bytes 0–128 MB","bxb"],["Task 2 · a, 128–256 MB","bxb"],["Task 3 · a 44 MB + b 40 MB + c 20 MB","bxb"],["Task 4 · d 10 MB","bxb"],["Task 5 · e.csv.gz, all 2 GB","bxr"]],
+  map:[[0,0],[0,1],[0,2],[1,2],[2,2],[3,3],[4,4]],
+  tiles:[["5","read tasks"],["128 MB","max split size (maxPartitionBytes)"],["2 GB","largest task: gzip can't split"]],
+  note:"Splittable files are cut at 128 MB and small ones are packed together until a split is full. The gzip file can't be split, so one task decompresses and reads all 2 GB while the others finish in seconds. (Packing shown simplified: Spark sorts files by size before packing.)"},
+ jdbc:{left:"Ranges of order_id",src:[["order_id < 12.5M (or NULL)","bx"],["12.5M ≤ order_id < 25M","bx"],["25M ≤ order_id < 37.5M","bx"],["order_id ≥ 37.5M","bxr"]],
+  tasks:[["Task 1 · 0.4M rows","bxb"],["Task 2 · 0.6M rows","bxb"],["Task 3 · 2.0M rows","bxb"],["Task 4 · 17M rows","bxr"]],
+  map:[[0,0],[1,1],[2,2],[3,3]],
+  tiles:[["4","read tasks = queries = connections"],["bounds","partitionColumn bounds decide the ranges"],["85%","of rows in one task (example)"]],
+  note:"Equal-width ranges over order_id, but most orders are recent, so the last range holds most rows. Without partitioning options it would be a single task for everything. Quantile-based predicates fix the imbalance: try the calculator on the examples page."},
+ kafka:{left:"Topic partitions (offset range)",src:[["P0 · 5,000,000 messages","bxr"],["P1 · 900,000 messages","bx"],["P2 · 1,100,000 messages","bx"]],
+  tasks:[["Task 1 · P0","bxr"],["Task 2 · P1","bxb"],["Task 3 · P2","bxb"]],
+  map:[[0,0],[1,1],[2,2]],
+  tiles:[["3","read tasks = topic partitions"],["keys","producer keys decide partition sizes"],["split","minPartitions splits big ranges"]],
+  note:"One task per partition. P0 gets most messages because producers key by a dominant value, so its task takes five times longer. Setting minPartitions above 3 lets Spark split P0's offset range across several tasks."},
+ api:{left:"Request parameters",src:[["pages 1–50","bx"],["pages 51–100","bx"],["…","bx"],["pages 451–500","bx"]],
+  tasks:[["Task 1 · 50 calls","bxb"],["Task 2 · 50 calls","bxb"],["…","bxb"],["Task 10 · 50 calls","bxb"]],
+  map:[[0,0],[1,1],[2,2],[3,3]],
+  tiles:[["10","concurrent callers = partitions"],["you","decide, via repartition()"],["rate limit","sets the right number"]],
+  note:"You create the partitions: a DataFrame of 500 page numbers repartitioned into 10. Each task calls the API for its pages. Concurrency is min(partitions, free task slots), so size the partition count to the API's rate limit."}};
+function draw(k){const d=D[k];$("srcLines").innerHTML="";$("srcBoxes").innerHTML="";$("srcL").textContent=d.left;
+  const yS=i=>44+i*(240/d.src.length),yT=i=>44+i*(240/d.tasks.length),hS=Math.min(40,240/d.src.length-8),hT=Math.min(40,240/d.tasks.length-8);
+  d.map.forEach(([a,b])=>el("line",{class:d.tasks[b][1]==="bxr"?"lna":"ln",x1:300,y1:yS(a)+hS/2,x2:556,y2:yT(b)+hT/2},$("srcLines")));
+  d.src.forEach(([t,c],i)=>{el("rect",{class:c,x:20,y:yS(i),width:280,height:hS,rx:6},$("srcBoxes"));el("text",{class:"t",x:34,y:yS(i)+hS/2+5},$("srcBoxes"),t)});
+  d.tasks.forEach(([t,c],i)=>{el("rect",{class:c,x:560,y:yT(i),width:280,height:hT,rx:6},$("srcBoxes"));el("text",{class:"t",x:574,y:yT(i)+hT/2+5},$("srcBoxes"),t)});
+  $("srcOut").innerHTML=d.tiles.map(([v,l])=>`<div><b>${v}</b><span>${l}</span></div>`).join("");$("srcNote").textContent=d.note}
+document.querySelectorAll("#srcTabs button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("#srcTabs button").forEach(x=>x.setAttribute("aria-selected",x===b));draw(b.dataset.k)}));
+draw("files");
+})();
+</script>
+<script>
+(function(){
+  const KEY="de-learning-done-v2",items=[[28, "Parallel JDBC reads: partitionColumn, bounds and predicates"], [29, "Uneven source distribution: range skew and file layout"], [30, "File splits, non-splittable formats and small files at read time"], [31, "Distributed REST API ingestion (mapPartitions / mapInPandas)"], [32, "Batch reads from Kafka: offset ranges and partitions"], [33, "Choosing a read strategy per source (pushdown, extracts, federation)"]];
+  let done={};try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{}}catch(e){}
+  const box=document.getElementById("mine");
+  items.forEach(([i,t])=>{const id="spark"+i,row=document.createElement("div");row.className="topic"+(done[id]?" done":"");
+    row.innerHTML=`<input type="checkbox" id="m-${id}" ${done[id]?"checked":""}><span class="num">✓</span><label class="ttl" for="m-${id}">${t}</label>`;
+    row.querySelector("input").addEventListener("change",e=>{if(e.target.checked)done[id]=true;else delete done[id];row.classList.toggle("done",e.target.checked);try{localStorage.setItem(KEY,JSON.stringify(done))}catch(_){}});
+    box.appendChild(row)});
+})();
+</script>
+</body></html>

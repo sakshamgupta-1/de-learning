@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Reading Data in Parallel: Deep Dive</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../styles.css">
+</head><body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="../../index.html"><i></i>DE Learning</a>
+  <nav class="mods" aria-label="Spark Core modules">
+    <a href="../../index.html">Hub</a>
+    <a href="../mapreduce/index.html">Background</a>
+    <a href="../architecture/index.html">1 · Architecture</a>
+    <a href="../data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
+    <a href="../execution/index.html">3 · Execution</a>
+    <a href="../optimizer/index.html">4 · Optimizer &amp; AQE</a>
+    <a href="index.html" aria-current="page">5 · Reading data</a>
+    <a href="../tuning/index.html">6 · Tuning &amp; debug</a>
+  </nav>
+</div></header>
+
+<main class="page"><div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="../../index.html">Hub</a><span class="sep">›</span><a href="../index.html">Spark Core</a><span class="sep">›</span><a href="index.html">Reading data in parallel</a><span class="sep">›</span><span aria-current="page">Deep dive</span></nav>
+  <nav class="mtabs" aria-label="Module pages">
+    <a href="index.html">Overview</a>
+    <a href="deep-dive.html" aria-current="page">Deep dive</a>
+    <a href="examples.html">Examples</a>
+    <a href="production.html">Production issues</a>
+  </nav>
+  <p class="eyebrow">Spark Core · Module 5 of 6 · Deep dive</p>
+  <h1>How each source is split</h1>
+  <p class="lede">The exact rules behind read parallelism: how file splits are sized and packed, how JDBC ranges are generated, what gets pushed down, how Kafka offset ranges and API requests become tasks, and how to keep a parallel read consistent and incremental.</p>
+  <div class="toc">
+    <a href="#file-splits">File splits</a><a href="#splittable">Splittable formats</a><a href="#jdbc-ranges">JDBC ranges</a><a href="#jdbc-options">JDBC options</a><a href="#kafka-ranges">Kafka offset ranges</a><a href="#api-patterns">API patterns</a><a href="#connectors">Warehouse connectors</a><a href="#consistency">Consistency</a><a href="#incremental">Incremental extracts</a><a href="#check">Check yourself</a>
+  </div>
+
+  <section id="file-splits">
+    <h2>How file splits are sized and packed</h2>
+    <ol class="rail">
+      <li><div><b>Split size.</b> <code>maxSplitBytes = min(maxPartitionBytes, max(openCostInBytes, bytesPerCore))</code>, where <code>bytesPerCore</code> is the total input size (plus 4 MB per file) divided by <code>spark.sql.files.minPartitionNum</code>, which defaults to the default parallelism (total cores). So on a large cluster with little data, splits shrink below 128 MB to keep every core busy.</div></li>
+      <li><div><b>Cut.</b> Each splittable file is cut into pieces of at most <code>maxSplitBytes</code>; a non-splittable file stays whole.</div></li>
+      <li><div><b>Pack.</b> Pieces are sorted by size, largest first, and packed into partitions until adding the next piece (plus 4 MB open cost) would exceed <code>maxSplitBytes</code>.</div></li>
+      <li><div><b>Read.</b> One task per partition. For Parquet and ORC, a split is mapped to whole row groups or stripes, so a 1 GB row group is read by one task however the split falls.</div></li>
+    </ol>
+    <p>The <code>openCostInBytes</code> charge is why thousands of 100 KB files don't all land in one partition: each counts as at least 4 MB when packing. It doesn't remove the per-file cost of listing and opening, which is why small files still hurt (<a href="../tuning/production.html#s-small">small files</a>).</p>
+  </section>
+
+  <section id="splittable">
+    <h2>Splittable formats and compression</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Format</th><th>Splittable?</th><th>Unit Spark can start a task at</th></tr></thead>
+      <tbody>
+        <tr><td>Parquet (any codec)</td><td>Yes</td><td>Row group</td></tr>
+        <tr><td>ORC</td><td>Yes</td><td>Stripe</td></tr>
+        <tr><td>Avro container files</td><td>Yes</td><td>Sync marker between blocks</td></tr>
+        <tr><td>CSV / JSON lines, uncompressed</td><td>Yes</td><td>Next line break</td></tr>
+        <tr><td>CSV / JSON lines, bzip2</td><td>Yes</td><td>bzip2 block</td></tr>
+        <tr><td>CSV / JSON, gzip or zstd</td><td>No</td><td>Whole file</td></tr>
+        <tr><td><code>multiLine</code> JSON or CSV</td><td>No</td><td>Whole file (records span lines)</td></tr>
+        <tr><td>Excel, XML (one document), ZIP archives</td><td>No</td><td>Whole file</td></tr>
+      </tbody></table></div>
+    <p>A non-splittable file is read by one task, and all its rows sit in one partition until a shuffle. If later stages are heavy, <code>repartition()</code> right after the read spreads them; the read itself stays as slow as the largest file.</p>
+  </section>
+
+  <section id="jdbc-ranges">
+    <h2>Exactly how JDBC ranges are generated</h2>
+    <p>With <code>partitionColumn=id, lowerBound=0, upperBound=100, numPartitions=4</code>, Spark computes a stride of <code>upperBound/numPartitions − lowerBound/numPartitions</code> = 25 and issues four queries:</p>
+<pre><code>SELECT … FROM orders WHERE id &lt; 25 OR id IS NULL
+SELECT … FROM orders WHERE id &gt;= 25 AND id &lt; 50
+SELECT … FROM orders WHERE id &gt;= 50 AND id &lt; 75
+SELECT … FROM orders WHERE id &gt;= 75</code></pre>
+    <ul>
+      <li><b>Open ends:</b> the first range catches everything below and NULLs; the last everything above. Nothing is filtered by the bounds.</li>
+      <li><b>Too many partitions:</b> if <code>numPartitions</code> exceeds <code>upperBound − lowerBound</code>, Spark reduces it.</li>
+      <li><b>Dates and timestamps</b> (Spark 2.4+): bounds are given as date or timestamp strings and the ranges are equal time intervals.</li>
+      <li><b>Strings and UUIDs</b> can't be a <code>partitionColumn</code>. Use <code>predicates</code>, one <code>WHERE</code> clause per partition, which can be any condition the database accepts: ranges from quantiles, <code>MOD(ORA_HASH(id), 16) = 3</code>, <code>region = 'EU'</code>, or the database's own partitions.</li>
+      <li><b>Predicates must cover every row exactly once.</b> Spark doesn't check: overlapping clauses duplicate rows, gaps lose them.</li>
+      <li><b>Index the column.</b> Without an index on the partition column (or expression), every one of the N queries scans the whole table.</li>
+    </ul>
+  </section>
+
+  <section id="jdbc-options">
+    <h2>JDBC options that decide speed and load</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Option</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>dbtable</code> / <code>query</code></td><td>A table name, or a subquery. <code>query</code> can't be combined with <code>partitionColumn</code>; wrap it as <code>dbtable="(SELECT …) t"</code> instead</td></tr>
+        <tr><td><code>fetchsize</code></td><td>Rows per round trip. Driver defaults vary widely (Oracle's is 10); a few thousand to tens of thousands is typical for bulk reads</td></tr>
+        <tr><td><code>numPartitions</code></td><td>Partitions, and the maximum number of concurrent connections (also caps parallel writes)</td></tr>
+        <tr><td><code>pushDownPredicate</code></td><td>Filters go into each query's <code>WHERE</code> (on by default)</td></tr>
+        <tr><td><code>pushDownAggregate</code>, <code>pushDownLimit</code>, <code>pushDownTableSample</code></td><td>Push aggregates, limits and samples to the database (Spark 3.2–3.3+; defaults vary by version and dialect, so check <code>explain()</code>)</td></tr>
+        <tr><td><code>customSchema</code></td><td>Override inferred types, e.g. <code>"amount DECIMAL(38,10), id STRING"</code>, for unbounded <code>NUMBER</code> columns or precision problems</td></tr>
+        <tr><td><code>sessionInitStatement</code></td><td>SQL run once per connection before reading: session settings, isolation level, hints</td></tr>
+        <tr><td><code>queryTimeout</code></td><td>Seconds before the driver cancels a statement</td></tr>
+      </tbody></table></div>
+    <p>Check what really reached the database: <code>df.explain()</code> shows <code>PushedFilters</code> and, for aggregates, <code>PushedAggregates</code> on the JDBC scan. On the database side, the session or query log shows the N generated queries.</p>
+  </section>
+
+  <section id="kafka-ranges">
+    <h2>Kafka offset ranges</h2>
+<pre><code>df = (spark.read.format("kafka")
+      .option("kafka.bootstrap.servers", brokers)
+      .option("subscribe", "orders")
+      .option("startingOffsets", '{"orders":{"0":1000,"1":1000,"2":1000}}')
+      .option("endingOffsets", "latest")
+      .option("minPartitions", 24)                <span class="muted"># split big ranges over more tasks</span>
+      .load())</code></pre>
+    <ul>
+      <li>Each topic partition's offset range is one task unless <code>minPartitions</code> asks for more; Spark then splits the larger ranges proportionally.</li>
+      <li>Batch reads don't keep a checkpoint: you pass offsets (or timestamps via <code>startingOffsetsByTimestamp</code>) and track them yourself. A streaming read with <code>availableNow</code> gives the same parallelism with offsets tracked for you.</li>
+      <li>Messages are only readable within the topic's retention; ranges older than that fail (or are skipped with <code>failOnDataLoss=false</code>).</li>
+    </ul>
+  </section>
+
+  <section id="api-patterns">
+    <h2>API patterns</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Pattern</th><th>Parallel?</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td>Loop on the driver</td><td>No</td><td>A few hundred calls; simplest to debug</td></tr>
+        <tr><td>Thread pool on the driver</td><td>Yes, limited to one machine</td><td>Thousands of light calls; responses fit in driver memory</td></tr>
+        <tr><td><code>mapInPandas</code> / <code>rdd.mapPartitions</code> over request parameters</td><td>Yes, across executors</td><td>Large fan-outs; responses written straight to a table</td></tr>
+        <tr><td>Python data source (Spark 4.0+)</td><td>Yes: you define the partitions</td><td>A reusable <code>spark.read.format("myapi")</code> connector for many jobs</td></tr>
+        <tr><td>Ingestion tool or function lands files, then Auto Loader</td><td>Yes, outside Spark</td><td>Long-running syncs, complex auth, or when Spark clusters shouldn't call external APIs</td></tr>
+      </tbody></table></div>
+    <h3>Pagination decides what can run in parallel</h3>
+    <ul>
+      <li><b>Page number or offset</b> (<code>?page=37</code>): fetch page 1 for the total, generate every page number, fan them out. Data changing during the read can shift rows between pages, so dedupe on a key.</li>
+      <li><b>Cursor or next-link</b> (<code>?after=abc</code>): each page needs the previous response, so one sequence runs in one task. Parallelise across independent keys instead: per customer, per day, per region.</li>
+      <li><b>Time windows</b> (<code>?from=…&amp;to=…</code>): split the period into windows and fan those out; the most parallel and the easiest to rerun.</li>
+    </ul>
+    <h3>What the executors need</h3>
+    <ul>
+      <li><b>Network access</b> from executors to the API (firewalls and private endpoints often allow only the driver's subnet, or nothing).</li>
+      <li><b>Credentials</b> passed into the function, from a secret store on the driver; refresh short-lived tokens per partition.</li>
+      <li><b>Rate limits</b> shared by all tasks: concurrency × calls per second per task must stay under the API's limit. Retries with backoff honour <code>Retry-After</code>.</li>
+      <li><b>Idempotent calls</b>: task retries and speculation repeat calls. Use GETs; turn speculation off for these jobs.</li>
+    </ul>
+  </section>
+
+  <section id="connectors">
+    <h2>Warehouse and lakehouse connectors</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Source</th><th>How parallel reads work</th></tr></thead>
+      <tbody>
+        <tr><td>Snowflake (Spark connector)</td><td>Pushes the query down, unloads results to a stage in parallel, and Spark reads the staged files</td></tr>
+        <tr><td>BigQuery (Spark connector)</td><td>Reads through the Storage Read API as several parallel streams, with column and filter pushdown</td></tr>
+        <tr><td>Delta Sharing</td><td>The provider returns pre-signed file URLs; Spark reads the files in parallel</td></tr>
+        <tr><td>Lakehouse Federation (Databricks)</td><td>Queries run on the source with pushdown; good for exploration and small results, not bulk extraction</td></tr>
+      </tbody></table></div>
+    <p>In every case, check <code>explain()</code> for what was pushed down: a filter that isn't pushed means the whole table crosses the network.</p>
+  </section>
+
+  <section id="consistency">
+    <h2>Consistency across parallel queries</h2>
+    <p>N partitions means N independent queries, possibly seconds or minutes apart. Rows inserted, updated or deleted in between can be missed, read twice (if their partition column changed) or read in a mix of old and new states.</p>
+    <ul>
+      <li><b>Read a fixed point:</b> a read replica paused at a point in time, a database snapshot, Oracle flashback (<code>AS OF SCN</code>) in each predicate, or SQL Server snapshot isolation via <code>sessionInitStatement</code>.</li>
+      <li><b>Partition on a column that doesn't change</b> (an id, a creation date), never on <code>updated_at</code> or status.</li>
+      <li><b>Export first</b> when consistency matters and the table is large: one consistent dump to files, then a parallel file read.</li>
+    </ul>
+  </section>
+
+  <section id="incremental">
+    <h2>Incremental extracts</h2>
+    <ul>
+      <li><b>Watermark column:</b> read <code>WHERE updated_at &gt; :last_max</code>, store the new maximum after a successful write. Overlap slightly (<code>&gt;= last_max − 5 min</code>) and MERGE, so transactions committing late aren't missed. Misses hard deletes.</li>
+      <li><b>CDC:</b> log-based capture (Debezium, GoldenGate, DMS) into Kafka or files catches deletes and every change without querying the table.</li>
+      <li><b>Partition the extract too:</b> a large daily delta still needs <code>predicates</code> or a partition column to read in parallel.</li>
+    </ul>
+  </section>
+
+  <section id="check">
+    <h2>Check yourself</h2>
+    <div class="qa">
+      <details><summary>On a 200-core cluster, 2 GB of Parquet reads with about 200 tasks, not 16. Why?</summary><div>Splits shrink when data per core is small: bytesPerCore = 2 GB ÷ 200 ≈ 10 MB, which is below 128 MB, so <code>maxSplitBytes</code> becomes about 10 MB and Spark makes roughly 200 splits (bounded by row groups).</div></details>
+      <details><summary>Why can't you pass <code>query</code> together with <code>partitionColumn</code>?</summary><div>Spark needs to wrap the source in its own <code>SELECT … WHERE range</code>. Give the subquery as <code>dbtable="(SELECT …) AS t"</code> and partition on one of its columns.</div></details>
+      <details><summary>A cursor-paginated API returns 10 million records. How do you parallelise it?</summary><div>You can't parallelise one cursor chain. Split the request space by something independent (date ranges, customers, regions), run one cursor chain per split in parallel tasks, and land raw pages.</div></details>
+    </div>
+  </section>
+
+  <nav class="next">
+    <a href="index.html"><span>Back</span><b>Overview</b></a>
+    <a href="examples.html"><span>Next</span><b>Examples</b></a>
+  </nav>
+</div></main>
+</body></html>

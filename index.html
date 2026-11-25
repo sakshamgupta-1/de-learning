@@ -15,7 +15,8 @@
     <a href="spark/data-abstractions/index.html">2 · RDD &amp; DataFrames</a>
     <a href="spark/execution/index.html">3 · Execution</a>
     <a href="spark/optimizer/index.html">4 · Optimizer &amp; AQE</a>
-    <a href="spark/tuning/index.html">5 · Tuning &amp; debug</a>
+    <a href="spark/reading/index.html">5 · Reading data</a>
+    <a href="spark/tuning/index.html">6 · Tuning &amp; debug</a>
   </nav>
 </div></header>
 
@@ -23,17 +24,17 @@
   <div class="wide">
     <p class="eyebrow">Interview prep library</p>
     <h1>Data engineering topics, one place</h1>
-    <p class="lede">98 data engineering interview topics across eight areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
+    <p class="lede">104 data engineering interview topics across eight areas. Tick topics off as you go; progress stays in this browser. Start with the Spark Core path below.</p>
 
     <div class="summary">
-      <div><div class="big" id="pct">0<small>/98</small></div><div class="muted small">topics done</div></div>
+      <div><div class="big" id="pct">0<small>/104</small></div><div class="muted small">topics done</div></div>
       <div class="sectbars" id="sectbars"></div>
     </div>
 
     <section>
       <p class="eyebrow">Start here</p>
       <h2>Spark Core path</h2>
-      <p class="muted">A short background page and five modules, in order. Each module starts with a quick overview; deeper pages hang off it. Plan about 45–60 minutes per module.</p>
+      <p class="muted">A short background page and six modules, in order. Each module starts with a quick overview; deeper pages hang off it. Plan about 45–60 minutes per module.</p>
       <div class="paths">
         <a class="mod" href="spark/mapreduce/index.html" data-mod="mr">
           <span class="n">Background</span><b>Hadoop &amp; MapReduce</b>
@@ -60,8 +61,13 @@
           <p>Optimizer phases, pushdown and pruning, reading explain(), join strategies, AQE, UDF cost.</p>
           <div class="ft"><span>≈60 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
+        <a class="mod" href="spark/reading/index.html" data-mod="read">
+          <span class="n">Module 5</span><b>Reading data in parallel</b>
+          <p>Files, JDBC, Kafka and REST APIs: who decides the read tasks, and how to keep them even.</p>
+          <div class="ft"><span>≈50 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
+        </a>
         <a class="mod" href="spark/tuning/index.html" data-mod="tune">
-          <span class="n">Module 5</span><b>Performance tuning &amp; debugging</b>
+          <span class="n">Module 6</span><b>Performance tuning &amp; debugging</b>
           <p>Guided debug flow, six failure scenarios, shuffle reduction, salting, partition and executor sizing.</p>
           <div class="ft"><span>≈75 min</span><span class="mc"></span></div><div class="bar"><i></i></div>
         </a>
@@ -85,7 +91,7 @@
 </main>
 
 <script>
-const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark/tuning/index.html",TD="spark/tuning/deep-dive.html",TE="spark/tuning/examples.html",TP="spark/tuning/production.html";
+const M="spark/mapreduce/index.html",R="spark/data-abstractions/index.html",P="spark/data-abstractions/production.html",V="spark/data-abstractions/deep-dive.html",A="spark/architecture/index.html",D="spark/architecture/deep-dive.html",E="spark/execution/index.html",X="spark/execution/deep-dive.html",O="spark/optimizer/index.html",T="spark/tuning/index.html",TD="spark/tuning/deep-dive.html",TE="spark/tuning/examples.html",TP="spark/tuning/production.html",RI="spark/reading/index.html",RX="spark/reading/examples.html";
 const GROUPS=[
  {id:"spark",name:"Spark core",items:[
   ["Spark architecture: driver, executors, cluster manager",A+"#components","arch"],
@@ -115,7 +121,13 @@ const GROUPS=[
   ["Hadoop & MapReduce basics, and what Spark improved",M+"#spark","mr"],
   ["RDD vs DataFrame vs Dataset vs pandas DataFrame",R+"#compare","abs"],
   ["toPandas, Arrow and the pandas API on Spark",P+"#topandas","abs"],
-  ["Apache Arrow and vectorised execution (pandas UDFs)",V+"#arrow","abs"]]},
+  ["Apache Arrow and vectorised execution (pandas UDFs)",V+"#arrow","abs"],
+  ["Parallel JDBC reads: partitionColumn, bounds and predicates",RI+"#jdbc","read"],
+  ["Uneven source distribution: range skew and file layout",RX+"#jdbc-calc","read"],
+  ["File splits, non-splittable formats and small files at read time",RI+"#files","read"],
+  ["Distributed REST API ingestion (mapPartitions / mapInPandas)",RI+"#apis","read"],
+  ["Batch reads from Kafka: offset ranges and partitions",RI+"#kafka","read"],
+  ["Choosing a read strategy per source (pushdown, extracts, federation)",RI+"#strategy","read"]]},
  {id:"stream",name:"Structured Streaming",items:[
   ["Different output modes in Structured Streaming"],
   ["How to handle late data in Structured Streaming"],
